@@ -43,7 +43,7 @@ void rrc::init(rrc_cfg_t *cfg_,
                pdcp_interface_rrc* pdcp_, 
                s1ap_interface_rrc *s1ap_,
                gtpu_interface_rrc* gtpu_,
-	       agent_interface_rrc* agent_,
+			   agent_interface_rrc* agent_,
                srslte::log* log_rrc)
 {
   phy     = phy_; 
@@ -173,7 +173,6 @@ uint32_t rrc::generate_sibs()
 
 void rrc::config_mac()
 { 
-  
   // Fill MAC scheduler configuration for SIBs 
   sched_interface::cell_cfg_t sched_cfg; 
   bzero(&sched_cfg, sizeof(sched_interface::cell_cfg_t));
@@ -367,7 +366,7 @@ void rrc::release_complete(uint16_t rnti)
 
 bool rrc::setup_ue_ctxt(uint16_t rnti, LIBLTE_S1AP_MESSAGE_INITIALCONTEXTSETUPREQUEST_STRUCT *msg)
 {
-  rrc_log->info("Adding initial context for 0x%x\n", rnti);
+  rrc_log->info("setup_ue_ctxt() --- Adding initial context for 0x%x\n", rnti);
 
   if(users.count(rnti) == 0) {
     rrc_log->warning("Unrecognised rnti: 0x%x\n", rnti);
@@ -414,24 +413,43 @@ bool rrc::setup_ue_ctxt(uint16_t rnti, LIBLTE_S1AP_MESSAGE_INITIALCONTEXTSETUPRE
     rrc_log->warning("Not handling UERadioCapability\n");
   }
 
-  // UEAggregateMaximumBitrate
-  users[rnti].set_bitrates(&msg->uEaggregateMaximumBitrate);
 
-  // UESecurityCapabilities
-  users[rnti].set_security_capabilities(&msg->UESecurityCapabilities);
+  /*************code for Admission Control ****************/
 
-  // SecurityKey
-  uint8_t key[32];
-  liblte_pack(msg->SecurityKey.buffer, LIBLTE_S1AP_SECURITYKEY_BIT_STRING_LEN, key);
-  users[rnti].set_security_key(key, LIBLTE_S1AP_SECURITYKEY_BIT_STRING_LEN/8);
+  //The first two times do not allow connection, the third yes
 
-  // Send RRC security mode command
-  users[rnti].send_security_mode_command();
+  uint16_t modulo = 0;
+  modulo = rnti%3;
 
-  // Setup E-RABs
-  users[rnti].setup_erabs(&msg->E_RABToBeSetupListCtxtSUReq);
+  if (modulo==0){
 
-  return true;
+	  rrc_log->info("KAT Modulo %d ---- Return TRUE\n", modulo);
+
+	  // UEAggregateMaximumBitrate
+	  users[rnti].set_bitrates(&msg->uEaggregateMaximumBitrate);
+
+	  // UESecurityCapabilities
+	  users[rnti].set_security_capabilities(&msg->UESecurityCapabilities);
+
+	  // SecurityKey
+	  uint8_t key[32];
+	  liblte_pack(msg->SecurityKey.buffer, LIBLTE_S1AP_SECURITYKEY_BIT_STRING_LEN, key);
+	  users[rnti].set_security_key(key, LIBLTE_S1AP_SECURITYKEY_BIT_STRING_LEN/8);
+
+	  // Send RRC security mode command
+	  users[rnti].send_security_mode_command();
+
+	  // Setup E-RABs
+	  users[rnti].setup_erabs(&msg->E_RABToBeSetupListCtxtSUReq);
+
+	  return true;
+
+	}else{
+	  rrc_log->info("KAT Modulo %d ---- Return FALSE\n", modulo);
+	  return false;
+	}
+
+  /**********************************************************/
 }
 
 bool rrc::setup_ue_erabs(uint16_t rnti, LIBLTE_S1AP_MESSAGE_E_RABSETUPREQUEST_STRUCT *msg)
@@ -934,10 +952,11 @@ void rrc::ue::handle_rrc_reconf_complete(LIBLTE_RRC_CONNECTION_RECONFIGURATION_C
 {
   parent->rrc_log->info("RRCReconfigurationComplete transaction ID: %d\n", msg->rrc_transaction_id);
 
-
   // Acknowledge Dedicated Configuration
   parent->phy->set_conf_dedicated_ack(rnti, true);
   parent->mac->phy_config_enabled(rnti, true);
+
+
 }
 
 void rrc::ue::handle_security_mode_complete(LIBLTE_RRC_SECURITY_MODE_COMPLETE_STRUCT *msg)
@@ -1009,6 +1028,8 @@ void rrc::ue::set_security_key(uint8_t* key, uint32_t length)
 
 bool rrc::ue::setup_erabs(LIBLTE_S1AP_E_RABTOBESETUPLISTCTXTSUREQ_STRUCT *e)
 {
+	parent->rrc_log->info("KAT setup_erabs() get ITEM from the CTXT LIST\n");
+
   for(uint32_t i=0; i<e->len; i++) {
     LIBLTE_S1AP_E_RABTOBESETUPITEMCTXTSUREQ_STRUCT *erab = &e->buffer[i];
     if(erab->ext) {
@@ -1025,6 +1046,10 @@ bool rrc::ue::setup_erabs(LIBLTE_S1AP_E_RABTOBESETUPLISTCTXTSUREQ_STRUCT *e)
     uint32_t teid_out;
     uint8_to_uint32(erab->gTP_TEID.buffer, &teid_out);
     LIBLTE_S1AP_NAS_PDU_STRUCT *nas_pdu = erab->nAS_PDU_present ? &erab->nAS_PDU : NULL;
+    if (nas_pdu)
+    {
+    	parent->rrc_log->info("KAT nas pdu present\n");
+    }
     setup_erab(erab->e_RAB_ID.E_RAB_ID, &erab->e_RABlevelQoSParameters,
                &erab->transportLayerAddress, teid_out, nas_pdu);
   }
@@ -1062,6 +1087,8 @@ void rrc::ue::setup_erab(uint8_t id, LIBLTE_S1AP_E_RABLEVELQOSPARAMETERS_STRUCT 
                          LIBLTE_S1AP_TRANSPORTLAYERADDRESS_STRUCT *addr, uint32_t teid_out,
                          LIBLTE_S1AP_NAS_PDU_STRUCT *nas_pdu)
 {
+  parent->rrc_log->info("KAT setup_erab() get id, qos, addr, teid_out\n");
+
   erabs[id].id = id;
   memcpy(&erabs[id].qos_params, qos, sizeof(LIBLTE_S1AP_E_RABLEVELQOSPARAMETERS_STRUCT));
   memcpy(&erabs[id].address, addr, sizeof(LIBLTE_S1AP_TRANSPORTLAYERADDRESS_STRUCT));
@@ -1095,15 +1122,23 @@ void rrc::ue::notify_s1ap_ue_ctxt_setup_complete()
   res.E_RABSetupListCtxtSURes.len = 0;
   res.E_RABFailedToSetupListCtxtSURes.len = 0;
 
+  parent->rrc_log->info("KAT Inside notify_s1ap_ue_CTXT_setup_complete() --- rnti=0x%x\n", rnti);
+
+
   typedef std::map<uint8_t, erab_t>::iterator it_t;
   for(it_t it=erabs.begin(); it!=erabs.end(); ++it) {
     uint32_t j = res.E_RABSetupListCtxtSURes.len++;
+
+    parent->rrc_log->info("KAT Inside notify_s1ap_ue_CTXT_setup_complete() --- E_RABCTXT.len=%d\n", j);
+
     res.E_RABSetupListCtxtSURes.buffer[j].ext = false;
     res.E_RABSetupListCtxtSURes.buffer[j].iE_Extensions_present = false;
     res.E_RABSetupListCtxtSURes.buffer[j].e_RAB_ID.ext = false;
     res.E_RABSetupListCtxtSURes.buffer[j].e_RAB_ID.E_RAB_ID = it->second.id;
     uint32_to_uint8(it->second.teid_in, res.E_RABSetupListCtxtSURes.buffer[j].gTP_TEID.buffer);
   }
+
+  parent->rrc_log->info("KAT calls s1ap ue_ctxt_setup_complete()\n");
 
   parent->s1ap->ue_ctxt_setup_complete(rnti, &res);
 }
@@ -1125,6 +1160,9 @@ void rrc::ue::notify_s1ap_ue_erab_setup_response(LIBLTE_S1AP_E_RABTOBESETUPLISTB
     res.E_RABSetupListBearerSURes.buffer[j].e_RAB_ID.E_RAB_ID = id;
     uint32_to_uint8(erabs[id].teid_in, res.E_RABSetupListBearerSURes.buffer[j].gTP_TEID.buffer);
   }
+
+    parent->rrc_log->info("KAT Inside notify_s1ap_ue_E-RAB_setup_response() --- rnti=0x%x\n", rnti);
+    parent->rrc_log->info("KAT calls s1ap ue_erab_setup_complete()\n");
 
   parent->s1ap->ue_erab_setup_complete(rnti, &res);
 }
@@ -1306,6 +1344,9 @@ int rrc::ue::get_drbid_config(LIBLTE_RRC_DRB_TO_ADD_MOD_STRUCT *drb, int drb_id)
   uint32_t erab_id  = lc_id + 2; 
   uint32_t qci = erabs[erab_id].qos_params.qCI.QCI;
   
+  parent->rrc_log->info("KAT Inside get_drbid_config\n");
+
+
   if (qci >= MAX_NOF_QCI) {
     parent->rrc_log->error("Invalid QCI=%d for ERAB_id=%d, DRB_id=%d\n", qci, erab_id, drb_id);
     return -1; 
@@ -1340,6 +1381,7 @@ int rrc::ue::get_drbid_config(LIBLTE_RRC_DRB_TO_ADD_MOD_STRUCT *drb, int drb_id)
 
 void rrc::ue::send_connection_reconf_upd(srslte::byte_buffer_t *pdu)
 {
+  parent->rrc_log->info("KAT Inside send_connection_reconf_upd\n");
   
   LIBLTE_RRC_DL_DCCH_MSG_STRUCT dl_dcch_msg; 
   bzero(&dl_dcch_msg, sizeof(LIBLTE_RRC_DL_DCCH_MSG_STRUCT));
@@ -1397,6 +1439,7 @@ void rrc::ue::send_connection_reconf_upd(srslte::byte_buffer_t *pdu)
 
 void rrc::ue::send_connection_reconf(srslte::byte_buffer_t *pdu)
 {
+  parent->rrc_log->info("KAT Inside send_connection_reconf --- will call the get_drbid_conf\n");
   
   LIBLTE_RRC_DL_DCCH_MSG_STRUCT dl_dcch_msg; 
   dl_dcch_msg.msg_type = LIBLTE_RRC_DL_DCCH_MSG_TYPE_RRC_CON_RECONFIG; 
@@ -1491,6 +1534,7 @@ void rrc::ue::send_connection_reconf(srslte::byte_buffer_t *pdu)
   parent->pdcp->add_bearer(rnti, 2, pdcp_cnfg);
 
   // Configure DRB1 in RLC
+  parent->rrc_log->info("KAT Calls add_bearer of the rlc\n");
   parent->rlc->add_bearer(rnti, 3, &conn_reconf->rr_cnfg_ded.drb_to_add_mod_list[0].rlc_cnfg);
 
   // Configure DRB1 in PDCP
@@ -1513,6 +1557,8 @@ void rrc::ue::send_connection_reconf(srslte::byte_buffer_t *pdu)
   // Reuse same PDU
   pdu->reset();
   
+  parent->rrc_log->info("KAT and sends the msg to DL in DCCH\n");
+
   send_dl_dcch(&dl_dcch_msg, pdu);
   
   state = RRC_STATE_WAIT_FOR_CON_RECONF_COMPLETE;
@@ -1520,6 +1566,8 @@ void rrc::ue::send_connection_reconf(srslte::byte_buffer_t *pdu)
 
 void rrc::ue::send_connection_reconf_new_bearer(LIBLTE_S1AP_E_RABTOBESETUPLISTBEARERSUREQ_STRUCT *e)
 {
+  parent->rrc_log->info("KAT Inside send_connection_reconf_new_bearer --- calls get_drbid_config\n");
+
   srslte::byte_buffer_t *pdu = parent->pool->allocate(__FUNCTION__);
 
   LIBLTE_RRC_DL_DCCH_MSG_STRUCT dl_dcch_msg;
@@ -1556,6 +1604,8 @@ void rrc::ue::send_connection_reconf_new_bearer(LIBLTE_S1AP_E_RABTOBESETUPLISTBE
     bearer_cfg.direction = srsenb::sched_interface::ue_bearer_cfg_t::BOTH;
     parent->mac->bearer_ue_cfg(rnti, lcid, &bearer_cfg);
 
+    parent->rrc_log->info("KAT Calls add_bearer of the rlc & pdcp\n");
+
     // Configure DRB in RLC
     parent->rlc->add_bearer(rnti, lcid, &conn_reconf->rr_cnfg_ded.drb_to_add_mod_list[i].rlc_cnfg);
     // Configure DRB in PDCP
@@ -1567,6 +1617,8 @@ void rrc::ue::send_connection_reconf_new_bearer(LIBLTE_S1AP_E_RABTOBESETUPLISTBE
     memcpy(conn_reconf->ded_info_nas_list[conn_reconf->N_ded_info_nas].msg, parent->erab_info.msg, parent->erab_info.N_bytes);
     conn_reconf->N_ded_info_nas++;
   }
+
+  parent->rrc_log->info("KAT and sends the msg to DL in DCCH\n");
 
   send_dl_dcch(&dl_dcch_msg, pdu);
 }
@@ -1712,6 +1764,8 @@ void rrc::ue::send_dl_ccch(LIBLTE_RRC_DL_CCCH_MSG_STRUCT *dl_ccch_msg)
 
 void rrc::ue::send_dl_dcch(LIBLTE_RRC_DL_DCCH_MSG_STRUCT *dl_dcch_msg, byte_buffer_t *pdu) 
 {  
+  parent->rrc_log->info("KAT Inside send_dl_dcch\n");
+
   if (!pdu) {
     pdu = parent->pool->allocate(__FUNCTION__);
   }

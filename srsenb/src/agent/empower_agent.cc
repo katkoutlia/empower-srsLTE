@@ -232,6 +232,15 @@ static int ea_ue_report(uint32_t mod, int trig_id)
   return em_agent->setup_UE_report(mod, trig_id);
 }
 
+/******************************************************************************
+ * UPC UE Report.                                                   *
+ ******************************************************************************/
+/*static int ea_ue_report_upc(uint32_t mod, int trig_id)
+{
+  return em_agent->setup_UE_report_upc(mod, trig_id);
+}*/
+
+
 static struct em_agent_ops empower_agent_ops = {
   .init               = 0,
   .release            = 0,
@@ -239,6 +248,7 @@ static struct em_agent_ops empower_agent_ops = {
   .cell_setup_request = ea_cell_setup,
   .enb_setup_request  = ea_enb_setup,
   .ue_report          = ea_ue_report,
+  //.ue_report_upc      = ea_ue_report_upc,
   .ue_measure         = ea_ue_measure,
   .handover_UE        = 0,
   .mac_report         = ea_mac_report,
@@ -399,6 +409,18 @@ int empower_agent::setup_UE_report(uint32_t mod_id, int trig_id)
 
   return 0;
 }
+
+/* UPC UE Report. */
+/*int empower_agent::setup_UE_report_upc(uint32_t mod_id, int trig_id)
+{
+  m_uer_mod  = mod_id;
+  m_uer_tr   = trig_id;
+  m_uer_feat = 1;
+
+  Debug("UPC UE report ready; reporting to module %d\n", mod_id);
+
+  return 0;
+}*/
 
 int empower_agent::setup_MAC_report(
   uint32_t mod_id, uint32_t interval, int trig_id)
@@ -809,6 +831,7 @@ void empower_agent::send_UE_report(void)
     ued[i].rnti = it->first;
     ued[i].plmn = it->second->m_plmn;
     ued[i].imsi = it->second->m_imsi;
+    Debug("send_UE_report function from empower_agent.cc file\n");
   }
 
   pthread_spin_unlock(&m_lock);
@@ -829,7 +852,53 @@ void empower_agent::send_UE_report(void)
   }
 
   em_send(m_id, buf, size);
+
 }
+
+
+/*UPC UE Report */
+/*void empower_agent::send_UE_report_upc(void)
+{
+  std::map<uint16_t, em_ue *>::iterator it;
+
+  int           i;
+  char          buf[EMPOWER_AGENT_BUF_SMALL_SIZE];
+  int           size;
+  ep_upc_ue_details upc_ued[16];
+
+  all_args_t * args = (all_args_t *)m_args;
+
+  pthread_spin_lock(&m_lock);
+
+  for(i = 0, it = m_ues.begin(); it != m_ues.end(); ++it, i++)
+  {
+    upc_ued[i].pci  = (uint16_t)args->enb.pci;
+    upc_ued[i].rnti = it->first;
+    upc_ued[i].plmn = it->second->m_plmn;
+    upc_ued[i].imsi = it->second->m_imsi;
+    Debug("send_UE_report_upc function from empower_agent.cc file\n");
+  }
+
+  pthread_spin_unlock(&m_lock);
+
+  size = epf_trigger_uerep_rep_upc(
+    buf,
+    EMPOWER_AGENT_BUF_SMALL_SIZE,
+    m_id,
+    (uint16_t)args->enb.pci,
+    m_uer_mod,
+    i,
+    EMPOWER_AGENT_MAX_UE,
+	upc_ued);
+
+  if(size < 0) {
+    Error("Cannot format UPC UE report reply\n");
+    return;
+  }
+
+  em_send(m_id, buf, size);
+}*/
+
 
 void empower_agent::send_UE_meas(em_ue::ue_meas * m)
 {
@@ -896,6 +965,7 @@ void empower_agent::dirty_ue_check()
     Debug("Sending UE report\n");
 
     send_UE_report();
+    //send_UE_report_upc();
     m_ues_dirty = 0;
   }
 }

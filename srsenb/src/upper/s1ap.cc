@@ -280,9 +280,13 @@ bool s1ap::user_link_lost(uint16_t rnti)
 
 void s1ap::ue_ctxt_setup_complete(uint16_t rnti, LIBLTE_S1AP_MESSAGE_INITIALCONTEXTSETUPRESPONSE_STRUCT *res)
 {
+  s1ap_log->info("KAT Inside S1AP ue_ctxt_setup_complete\n");
+
   if(res->E_RABSetupListCtxtSURes.len > 0) {
+	//s1ap_log->info("KAT E_RABSetupListCtxtSURes.len > 0 TRUE: send_initial_ctxt_setup_response rnti = 0x%x\n", rnti);
     send_initial_ctxt_setup_response(rnti, res);
   } else {
+	//s1ap_log->info("KAT E_RABSetupListCtxtSURes.len > 0 FALSE: send_initial_ctxt_setup_failure rnti = 0x%x\n", rnti);
     send_initial_ctxt_setup_failure(rnti);
   }
 }
@@ -421,6 +425,8 @@ bool s1ap::handle_s1ap_rx_pdu(srslte::byte_buffer_t *pdu)
 {
   LIBLTE_S1AP_S1AP_PDU_STRUCT rx_pdu;
 
+  s1ap_log->info("KAT Got s1ap received pdu:\n");
+
   if(liblte_s1ap_unpack_s1ap_pdu((LIBLTE_BYTE_MSG_STRUCT*)pdu, &rx_pdu) != LIBLTE_SUCCESS) {
     s1ap_log->error("Failed to unpack received PDU\n");
     return false;
@@ -428,12 +434,15 @@ bool s1ap::handle_s1ap_rx_pdu(srslte::byte_buffer_t *pdu)
 
   switch(rx_pdu.choice_type) {
   case LIBLTE_S1AP_S1AP_PDU_CHOICE_INITIATINGMESSAGE:
+	//s1ap_log->info("KAT call handle_initiatingmessage\n");
     return handle_initiatingmessage(&rx_pdu.choice.initiatingMessage);
     break;
   case LIBLTE_S1AP_S1AP_PDU_CHOICE_SUCCESSFULOUTCOME:
+	//s1ap_log->info("KAT call handle_successfuloutcome\n");
     return handle_successfuloutcome(&rx_pdu.choice.successfulOutcome);
     break;
   case LIBLTE_S1AP_S1AP_PDU_CHOICE_UNSUCCESSFULOUTCOME:
+	//s1ap_log->info("KAT call handle_unsuccessfuloutcome\n");
     return handle_unsuccessfuloutcome(&rx_pdu.choice.unsuccessfulOutcome);
     break;
   default:
@@ -446,16 +455,23 @@ bool s1ap::handle_s1ap_rx_pdu(srslte::byte_buffer_t *pdu)
 
 bool s1ap::handle_initiatingmessage(LIBLTE_S1AP_INITIATINGMESSAGE_STRUCT *msg)
 {
+  //s1ap_log->info("KAT Inside handle_initiatingmessage\n");
+
   switch(msg->choice_type) {
   case LIBLTE_S1AP_INITIATINGMESSAGE_CHOICE_DOWNLINKNASTRANSPORT:
+	//s1ap_log->info("KAT call handle_dlnastransport\n");
     return handle_dlnastransport(&msg->choice.DownlinkNASTransport);
   case LIBLTE_S1AP_INITIATINGMESSAGE_CHOICE_INITIALCONTEXTSETUPREQUEST:
+	s1ap_log->info("KAT call handle_initialctxtsetuprequest\n");
     return handle_initialctxtsetuprequest(&msg->choice.InitialContextSetupRequest);
   case LIBLTE_S1AP_INITIATINGMESSAGE_CHOICE_UECONTEXTRELEASECOMMAND:
+	s1ap_log->info("KAT call handle_uectxtreleasecommand\n");
     return handle_uectxtreleasecommand(&msg->choice.UEContextReleaseCommand);
   case LIBLTE_S1AP_INITIATINGMESSAGE_CHOICE_PAGING:
+	//s1ap_log->info("KAT call handle_paging\n");
     return handle_paging(&msg->choice.Paging);
   case LIBLTE_S1AP_INITIATINGMESSAGE_CHOICE_E_RABSETUPREQUEST:
+	s1ap_log->info("KAT call handle_erabsetuprequest\n");
     return handle_erabsetuprequest(&msg->choice.E_RABSetupRequest);
   default:
     s1ap_log->error("Unhandled intiating message: %s\n", liblte_s1ap_initiatingmessage_choice_text[msg->choice_type]);
@@ -522,7 +538,8 @@ bool s1ap::handle_dlnastransport(LIBLTE_S1AP_MESSAGE_DOWNLINKNASTRANSPORT_STRUCT
 
 bool s1ap::handle_initialctxtsetuprequest(LIBLTE_S1AP_MESSAGE_INITIALCONTEXTSETUPREQUEST_STRUCT *msg)
 {
-  s1ap_log->info("Received InitialContextSetupRequest\n");
+  s1ap_log->info("KAT Received InitialContextSetupRequest --- it will call the setup_ue_ctxt()\n");
+
   if(msg->ext) {
     s1ap_log->warning("Not handling S1AP message extension\n");
   }
@@ -540,8 +557,30 @@ bool s1ap::handle_initialctxtsetuprequest(LIBLTE_S1AP_MESSAGE_INITIALCONTEXTSETU
 
   // Setup UE ctxt in RRC
   if(!rrc->setup_ue_ctxt(rnti, msg)) {
-    return false;
+
+	  /*************code for Admission Control ****************/
+
+	  s1ap_log->info("KAT Got setup_ue_ctxt FALSE from the rrc\n");
+
+	  send_initial_ctxt_setup_failure(rnti);	//This results in crushing the eNB
+
+
+	  /*Another possible solution*/
+	  /*LIBLTE_S1AP_CAUSE_STRUCT cause;
+	  cause.ext                     = false;
+	  cause.choice_type             = LIBLTE_S1AP_CAUSE_CHOICE_RADIONETWORK;
+	  cause.choice.radioNetwork.ext = false;
+	  cause.choice.radioNetwork.e   = LIBLTE_S1AP_CAUSERADIONETWORK_REDUCE_LOAD_IN_SERVING_CELL;
+
+	  ue_ctxt_map[rnti].release_requested = true;
+
+	  send_uectxtreleaserequest(rnti, &cause);*/
+
+	  /**********************************************************/
+      return false;
   }
+
+  s1ap_log->info("KAT Got setup_ue_ctxt TRUE from the rrc\n");
 
   return true;
 }
@@ -771,6 +810,10 @@ bool s1ap::send_uectxtreleaserequest(uint16_t rnti, LIBLTE_S1AP_CAUSE_STRUCT *ca
   if(!mme_connected) {
     return false;
   }
+
+  s1ap_log->info("KAT Inside S1AP send_uectxtreleaserequest\n");
+
+
   srslte::byte_buffer_t msg;
 
   LIBLTE_S1AP_S1AP_PDU_STRUCT tx_pdu;
@@ -849,6 +892,10 @@ bool s1ap::send_initial_ctxt_setup_response(uint16_t rnti, LIBLTE_S1AP_MESSAGE_I
   if(!mme_connected) {
     return false;
   }
+
+  s1ap_log->info("KAT Inside send_initial_ctxt_setup_response rnti = 0x%x\n", rnti);
+
+
   srslte::byte_buffer_t *buf = pool_allocate;
   LIBLTE_S1AP_S1AP_PDU_STRUCT tx_pdu;
 
@@ -939,16 +986,26 @@ bool s1ap::send_erab_setup_response(uint16_t rnti, LIBLTE_S1AP_MESSAGE_E_RABSETU
 bool s1ap::send_initial_ctxt_setup_failure(uint16_t rnti)
 {
   if(!mme_connected) {
+	s1ap_log->info("KAT Inside send_initial_ctxt_setup_failure IF MME NOT Connected");
     return false;
   }
+
+  s1ap_log->info("KAT Inside send_initial_ctxt_setup_failure rnti = 0x%x\n", rnti);
+
+
   srslte::byte_buffer_t *buf = pool_allocate;
+
   LIBLTE_S1AP_S1AP_PDU_STRUCT tx_pdu;
   tx_pdu.ext         = false;
   tx_pdu.choice_type = LIBLTE_S1AP_S1AP_PDU_CHOICE_UNSUCCESSFULOUTCOME;
 
+  s1ap_log->info("KAT initial_ctxt_setup_failure tx_pdu creation \n");
+
   LIBLTE_S1AP_UNSUCCESSFULOUTCOME_STRUCT *unsucc = &tx_pdu.choice.unsuccessfulOutcome;
   unsucc->procedureCode = LIBLTE_S1AP_PROC_ID_INITIALCONTEXTSETUP;
   unsucc->choice_type   = LIBLTE_S1AP_UNSUCCESSFULOUTCOME_CHOICE_INITIALCONTEXTSETUPFAILURE;
+
+  s1ap_log->info("KAT initial_ctxt_setup_failure unsucc");
 
   LIBLTE_S1AP_MESSAGE_INITIALCONTEXTSETUPFAILURE_STRUCT *fail = &unsucc->choice.InitialContextSetupFailure;
   fail->ext                             = false;
@@ -962,7 +1019,21 @@ bool s1ap::send_initial_ctxt_setup_failure(uint16_t rnti)
   fail->Cause.choice.radioNetwork.ext = false;
   fail->Cause.choice.radioNetwork.e   = LIBLTE_S1AP_CAUSERADIONETWORK_UNSPECIFIED;
 
-  liblte_s1ap_pack_s1ap_pdu(&tx_pdu, (LIBLTE_BYTE_MSG_STRUCT*)&buf);
+  s1ap_log->info("KAT initial_ctxt_setup_failure fail creation \n");
+
+
+  /* Try to fix failure bug -- eNB crashes with failure response */
+  /* Tested fix: change the call of liblte_s1ap_pack_s1ap_pdu */
+
+  //Original:
+  //liblte_s1ap_pack_s1ap_pdu(&tx_pdu, (LIBLTE_BYTE_MSG_STRUCT*)&buf);
+  //KATs change:
+  liblte_s1ap_pack_s1ap_pdu(&tx_pdu, (LIBLTE_BYTE_MSG_STRUCT*)buf);
+
+
+
+  s1ap_log->info("KAT initial_ctxt_setup_failure pdu creation \n");
+
   s1ap_log->info_hex(buf->msg, buf->N_bytes, "Sending InitialContextSetupFailure for RNTI:0x%x", rnti);
 
   ssize_t n_sent = sctp_sendmsg(socket_fd, buf->msg, buf->N_bytes,

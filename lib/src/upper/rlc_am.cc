@@ -628,6 +628,8 @@ int  rlc_am::build_data_pdu(uint8_t *payload, uint32_t nof_bytes)
     return 0;
   }
 
+  log->info("KAT Inside rlc_am::build_data_pdu\n");
+
   byte_buffer_t *pdu = pool_allocate;
   if (!pdu) {
     log->console("Fatal Error: Could not allocate PDU in build_data_pdu()\n");

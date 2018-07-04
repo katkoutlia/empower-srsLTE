@@ -631,6 +631,8 @@ int sched::dl_sched_data(dl_sched_data_t data[MAX_DATA_LIST])
   uint32_t nof_ctrl_symbols = (cfg.cell.nof_prb<10)?(current_cfi+1):current_cfi; 
   dl_metric->new_tti(ue_db, start_rbg, avail_rbg, nof_ctrl_symbols, current_tti); 
   
+  //log_h->info("SCHED: KAT Inside dl_sched_data\n");
+
   int nof_data_elems = 0; 
   for(std::map<uint16_t, sched_ue>::iterator iter=ue_db.begin(); iter!=ue_db.end(); ++iter) {
     sched_ue *user      = (sched_ue*) &iter->second;
@@ -716,6 +718,8 @@ int sched::dl_sched(uint32_t tti, sched_interface::dl_sched_res_t* sched_result)
  
   /* Schedule RAR */
   sched_result->nof_rar_elems  += dl_sched_rar(sched_result->rar);
+
+  //log_h->info("SCHED: KAT Inside dl_sched  ---- calls dl_sched_data to send pending RLC data\n");
     
   /* Schedule pending RLC data */
   sched_result->nof_data_elems += dl_sched_data(sched_result->data);

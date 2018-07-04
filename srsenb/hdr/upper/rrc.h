@@ -100,7 +100,7 @@ class rrc : public rrc_interface_pdcp,
             public rrc_interface_mac, 
             public rrc_interface_rlc,
             public rrc_interface_s1ap,
-	    public rrc_interface_agent,
+			public rrc_interface_agent,
             public thread
 {
 public:

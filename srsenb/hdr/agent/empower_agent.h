@@ -33,6 +33,7 @@
 #include <map>
 #include <pthread.h>
 #include <string>
+#include <iostream>
 
 #include <srslte/common/log_filter.h>
 #include <srslte/common/threads.h>
@@ -91,6 +92,14 @@ public:
   int reset();
 
   int setup_UE_report(uint32_t mod_id, int trig_id);
+
+
+
+  /* UPC UE Report. */
+ // int setup_UE_report_upc(uint32_t mod_id, int trig_id);
+
+
+
   int setup_MAC_report(uint32_t mod_id, uint32_t interval, int trig_id);
 
   int setup_UE_period_meas(
@@ -222,6 +231,12 @@ private:
 
   void send_MAC_report(uint32_t mod_id, ep_macrep_det * det);
   void send_UE_report(void);
+
+  /*UPC send UE report */
+  void send_UE_report_upc(void);
+
+
+  //void send_UE_report_upc(void);
   void send_UE_meas(em_ue::ue_meas * m);
 
 };

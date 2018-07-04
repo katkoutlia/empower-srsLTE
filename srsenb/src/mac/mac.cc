@@ -454,6 +454,8 @@ int mac::get_dl_sched(uint32_t tti, dl_sched_t *dl_sched_res)
     return SRSLTE_ERROR_INVALID_INPUTS;  
   }
   
+  //log_h->info("KAT INside get_dl_sched ---- that calls dl_sched()\n");
+
   // Run scheduler with current info 
   sched_interface::dl_sched_res_t sched_result; 
   bzero(&sched_result, sizeof(sched_interface::dl_sched_res_t));
