@@ -29,8 +29,8 @@
 #include "srslte/common/threads.h"
 #include "srslte/common/log.h"
 
-#include "phy/txrx.h"
-#include "phy/phch_worker.h"
+#include "srsenb/hdr/phy/txrx.h"
+#include "srsenb/hdr/phy/phch_worker.h"
 
 #define Error(fmt, ...)   if (SRSLTE_DEBUG_ENABLED) log_h->error(fmt, ##__VA_ARGS__)
 #define Warning(fmt, ...) if (SRSLTE_DEBUG_ENABLED) log_h->warning(fmt, ##__VA_ARGS__)
@@ -42,13 +42,13 @@ using namespace std;
 
 namespace srsenb {
 
-txrx::txrx()
-{
+txrx::txrx() : tx_mutex_cnt(0), nof_tx_mutex(0), tti(0) {
   running = false;   
   radio_h = NULL; 
   log_h   = NULL; 
   workers_pool = NULL; 
-  worker_com   = NULL; 
+  worker_com   = NULL;
+  prach = NULL;
 }
 
 bool txrx::init(srslte::radio* radio_h_, srslte::thread_pool* workers_pool_, phch_common* worker_com_, prach_worker *prach_, srslte::log* log_h_, uint32_t prio_)
@@ -104,9 +104,7 @@ void txrx::run_thread()
   
   log_h->info("Starting RX/TX thread nof_prb=%d, sf_len=%d\n",worker_com->cell.nof_prb, sf_len);
 
-  // Start streaming RX samples
-  radio_h->start_rx();
-  
+
   // Set TTI so that first TX is at tti=0
   tti = 10235; 
     
@@ -127,7 +125,7 @@ void txrx::run_thread()
       srslte_timestamp_copy(&tx_time, &rx_time);
       srslte_timestamp_add(&tx_time, 0, HARQ_DELAY_MS*1e-3);
       
-      Debug("Settting TTI=%d, tx_mutex=%d, tx_time=%d:%f to worker %d\n", 
+      Debug("Settting TTI=%d, tx_mutex=%d, tx_time=%ld:%f to worker %d\n", 
             tti, tx_mutex_cnt, 
             tx_time.full_secs, tx_time.frac_secs,
             worker->get_id());

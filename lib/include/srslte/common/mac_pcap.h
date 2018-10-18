@@ -24,8 +24,8 @@
  *
  */
 
-#ifndef MACPCAP_H
-#define MACPCAP_H
+#ifndef SRSLTE_MAC_PCAP_H
+#define SRSLTE_MAC_PCAP_H
 
 #include <stdint.h>
 #include "srslte/common/pcap.h"
@@ -50,6 +50,7 @@ public:
   void write_dl_sirnti(uint8_t *pdu, uint32_t pdu_len_bytes, bool crc_ok, uint32_t tti);
   void write_dl_bch(uint8_t *pdu, uint32_t pdu_len_bytes, bool crc_ok, uint32_t tti);
   void write_dl_pch(uint8_t *pdu, uint32_t pdu_len_bytes, bool crc_ok, uint32_t tti);
+  void write_dl_mch(uint8_t *pdu, uint32_t pdu_len_bytes, bool crc_ok, uint32_t tti);
   
 private:
   bool enable_write; 
@@ -59,6 +60,6 @@ private:
                               uint16_t crnti_, uint8_t direction, uint8_t rnti_type);
 };
 
-} // namespace srsue
+} // namespace srslte
 
-#endif // MACPCAP_H
+#endif // SRSLTE_MAC_PCAP_H

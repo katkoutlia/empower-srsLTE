@@ -50,16 +50,16 @@ bool radio::init(char *args, char *devname, uint32_t nof_channels)
   
   // Suppress radio stdout
   srslte_rf_suppress_stdout(&rf_device);
-  
-  tx_adv_auto = true; 
+
+  continuous_tx = true;
+  tx_adv_auto = true;
   // Set default preamble length each known device
   // We distinguish by device family, maybe we should calibrate per device
   if (strstr(srslte_rf_name(&rf_device), "uhd")) {
-    burst_preamble_sec = uhd_default_burst_preamble_sec;
   } else if (strstr(srslte_rf_name(&rf_device), "bladerf")) {
     burst_preamble_sec = blade_default_burst_preamble_sec;
   } else {
-     burst_preamble_sec = 0;
+    burst_preamble_sec = 0;
     printf("\nWarning burst preamble is not calibrated for device %s. Set a value manually\n\n", srslte_rf_name(&rf_device));
   }
 
@@ -71,22 +71,30 @@ bool radio::init(char *args, char *devname, uint32_t nof_channels)
   }
   saved_nof_channels = nof_channels;
 
-  return true;    
+  is_initialized = true;
+  return true;
+}
+
+bool radio::is_init() {
+  return is_initialized;
 }
 
 void radio::stop() 
 {
-  srslte_rf_close(&rf_device);
+  if (zeros) {
+    free(zeros);
+  }
+  if (is_initialized) {
+    srslte_rf_close(&rf_device);
+  }
 }
 
 void radio::reset()
 {
   printf("Resetting Radio...\n");
-  srslte_rf_close(&rf_device);
-  sleep(3);
-  if (srslte_rf_open_devname(&rf_device, saved_devname, saved_args, saved_nof_channels)) {
-    fprintf(stderr, "Error opening RF device\n");
-  }
+  srslte_rf_stop_rx_stream(&rf_device);
+  radio_is_streaming = false;
+  usleep(100000);
 }
 
 void radio::set_manual_calibration(rf_cal_t* calibration)
@@ -106,6 +114,14 @@ void radio::set_tx_rx_gain_offset(float offset) {
 void radio::set_burst_preamble(double preamble_us)
 {
   burst_preamble_sec = (double) preamble_us/1e6; 
+}
+
+void radio::set_continuous_tx(bool enable) {
+  continuous_tx = enable;
+}
+
+bool radio::is_continuous_tx() {
+  return continuous_tx;
 }
 
 void radio::set_tx_adv(int nsamples)
@@ -141,6 +157,10 @@ bool radio::rx_at(void* buffer, uint32_t nof_samples, srslte_timestamp_t rx_time
 
 bool radio::rx_now(void* buffer[SRSLTE_MAX_PORTS], uint32_t nof_samples, srslte_timestamp_t* rxd_time)
 {
+  if (!radio_is_streaming) {
+    srslte_rf_start_rx_stream(&rf_device, false);
+    radio_is_streaming = true;
+  }
   if (srslte_rf_recv_with_time_multi(&rf_device, buffer, nof_samples, true,
     rxd_time?&rxd_time->full_secs:NULL, rxd_time?&rxd_time->frac_secs:NULL) > 0) {
     return true; 
@@ -169,7 +189,7 @@ float radio::set_tx_power(float power)
 
 float radio::get_max_tx_power()
 {
-  return 10;
+  return 40;
 }
 
 float radio::get_rssi()
@@ -313,6 +333,11 @@ double radio::get_rx_freq()
   return rx_freq;
 }
 
+double radio::get_freq_offset()
+{
+  return freq_offset;
+}
+
 double radio::get_tx_freq()
 {
   return tx_freq; 
@@ -439,16 +464,10 @@ void radio::set_tx_srate(double srate)
   
   // Calculate TX advance in seconds from samples and sampling rate 
   tx_adv_sec = nsamples/cur_tx_srate;
-}
-
-void radio::start_rx(bool now)
-{
-  srslte_rf_start_rx_stream(&rf_device, now);
-}
-
-void radio::stop_rx()
-{
-  srslte_rf_stop_rx_stream(&rf_device);
+  if (tx_adv_sec<0) {
+    tx_adv_sec *= -1;
+    tx_adv_negative = true; 
+  }
 }
 
 void radio::register_error_handler(srslte_rf_error_handler_t h)
@@ -456,6 +475,9 @@ void radio::register_error_handler(srslte_rf_error_handler_t h)
   srslte_rf_register_error_handler(&rf_device, h);
 }
 
+srslte_rf_info_t *radio::get_info() {
+    return srslte_rf_get_info(&rf_device);
+}
   
 }
 

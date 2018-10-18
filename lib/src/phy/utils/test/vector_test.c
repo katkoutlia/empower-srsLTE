@@ -32,6 +32,7 @@
 #include <sys/time.h>
 #include <memory.h>
 #include <math.h>
+#include <srslte/srslte.h>
 
 #include "srslte/phy/utils/mat.h"
 #include "srslte/phy/utils/simd.h"
@@ -47,10 +48,9 @@ bool verbose = false;
 #define MAX_FUNCTIONS (64)
 #define MAX_BLOCKS (16)
 
-
-#define RANDOM_F() ((float)rand())/((float)RAND_MAX)
-#define RANDOM_S() ((int16_t)(rand() && 0x800F))
-#define RANDOM_B() ((int8_t)(rand() && 0x8008))
+#define RANDOM_F() (((float) rand()) / ((float) RAND_MAX) * 2.0f - 1.0f)
+#define RANDOM_S() ((int16_t)(rand() & 0x800F))
+#define RANDOM_B() ((int8_t)(rand() & 0x8008))
 #define RANDOM_CF() (RANDOM_F() + _Complex_I*RANDOM_F())
 
 #define TEST_CALL(TEST_CODE)   gettimeofday(&start, NULL);\
@@ -137,7 +137,7 @@ TEST(srslte_vec_dot_prod_sss,
          MALLOC(int16_t, y);
          int16_t z;
 
-         cf_t gold = 0.0f;
+         int16_t gold = 0.0f;
          for (int i = 0; i < block_size; i++) {
            x[i] = RANDOM_S();
            y[i] = RANDOM_S();
@@ -149,7 +149,7 @@ TEST(srslte_vec_dot_prod_sss,
            gold += x[i] * y[i];
          }
 
-         mse += cabsf(gold - z) / cabsf(gold);
+         mse = (gold - z) / abs(gold);
 
          free(x);
          free(y);
@@ -160,7 +160,7 @@ TEST(srslte_vec_sum_sss,
          MALLOC(int16_t, y);
          MALLOC(int16_t, z);
 
-         cf_t gold = 0.0f;
+         int16_t gold = 0;
          for (int i = 0; i < block_size; i++) {
            x[i] = RANDOM_S();
            y[i] = RANDOM_S();
@@ -170,7 +170,7 @@ TEST(srslte_vec_sum_sss,
 
          for (int i = 0; i < block_size; i++) {
            gold = x[i] + y[i];
-           mse += cabsf(gold - z[i]);
+           mse += abs(gold - z[i]);
          }
 
          free(x);
@@ -183,7 +183,7 @@ TEST(srslte_vec_sub_sss,
          MALLOC(int16_t, y);
          MALLOC(int16_t, z);
 
-         cf_t gold = 0.0f;
+         int16_t gold = 0.0f;
          for (int i = 0; i < block_size; i++) {
            x[i] = RANDOM_S();
            y[i] = RANDOM_S();
@@ -193,7 +193,7 @@ TEST(srslte_vec_sub_sss,
 
          for (int i = 0; i < block_size; i++) {
            gold = x[i] - y[i];
-           mse += cabsf(gold - z[i]);
+           mse += abs(gold - z[i]);
          }
 
          free(x);
@@ -206,7 +206,7 @@ TEST(srslte_vec_prod_sss,
          MALLOC(int16_t, y);
          MALLOC(int16_t, z);
 
-         cf_t gold = 0.0f;
+         int16_t gold = 0.0f;
          for (int i = 0; i < block_size; i++) {
            x[i] = RANDOM_S();
            y[i] = RANDOM_S();
@@ -216,7 +216,7 @@ TEST(srslte_vec_prod_sss,
 
          for (int i = 0; i < block_size; i++) {
            gold = x[i] * y[i];
-           mse += cabsf(gold - z[i]);
+           mse += abs(gold - z[i]);
          }
 
          free(x);
@@ -265,6 +265,7 @@ TEST(srslte_vec_sum_fff,
 
          free(x);
          free(y);
+         free(z);
 )
 
 TEST(srslte_vec_sub_fff,
@@ -287,6 +288,7 @@ TEST(srslte_vec_sub_fff,
 
          free(x);
          free(y);
+         free(z);
 )
 
 TEST(srslte_vec_dot_prod_ccc,
@@ -354,6 +356,7 @@ TEST(srslte_vec_prod_ccc,
   }
 
   free(x);
+  free(y);
   free(z);
 )
 
@@ -407,6 +410,7 @@ TEST(srslte_vec_prod_conj_ccc,
   }
 
   free(x);
+  free(y);
   free(z);
 )
 
@@ -446,6 +450,28 @@ TEST(srslte_vec_convert_fi,
   for (int i = 0; i < block_size; i++) {
       gold = (short) ((x[i] * scale));
       mse += cabsf((float)gold - (float) z[i]);
+  }
+
+  free(x);
+  free(z);
+)
+
+TEST(srslte_vec_convert_if,
+  MALLOC(int16_t, x);
+  MALLOC(float, z);
+      float scale = 1000.0f;
+
+  float gold;
+  float k = 1.0f/scale;
+  for (int i = 0; i < block_size; i++) {
+    x[i] = (int16_t) RANDOM_S();
+  }
+
+  TEST_CALL(srslte_vec_convert_if(x, scale, z, block_size))
+
+  for (int i = 0; i < block_size; i++) {
+      gold = ((float)x[i]) * k;
+      mse += fabsf(gold - z[i]);
   }
 
   free(x);
@@ -596,7 +622,7 @@ TEST(srslte_vec_div_ccc,
 
          for (int i = 0; i < block_size; i++) {
            gold = x[i] / y[i];
-           mse += cabsf(gold - z[i]);
+           mse += cabsf(gold - z[i]) / cabsf(gold);
          }
          mse /= block_size;
 
@@ -614,14 +640,14 @@ TEST(srslte_vec_div_cfc,
          cf_t gold;
          for (int i = 0; i < block_size; i++) {
            x[i] = RANDOM_CF();
-           y[i] = RANDOM_F();
+           y[i] = RANDOM_F() + 0.0001f;
          }
 
          TEST_CALL(srslte_vec_div_cfc(x, y, z, block_size))
 
          for (int i = 0; i < block_size; i++) {
            gold = x[i] / y[i];
-           mse += cabsf(gold - z[i])/cabsf(gold);
+           mse += cabsf(gold - z[i]) / cabsf(gold);
          }
          mse /= block_size;
 
@@ -638,15 +664,15 @@ TEST(srslte_vec_div_fff,
 
          cf_t gold;
          for (int i = 0; i < block_size; i++) {
-           x[i] = RANDOM_F() + 0.0001;
-           y[i] = RANDOM_F()+ 0.0001;
+           x[i] = RANDOM_F();
+           y[i] = RANDOM_F() + 0.0001f;
          }
 
          TEST_CALL(srslte_vec_div_fff(x, y, z, block_size))
 
          for (int i = 0; i < block_size; i++) {
            gold = x[i] / y[i];
-           mse += cabsf(gold - z[i]);
+           mse += cabsf(gold - z[i]) / cabsf(gold);
          }
          mse /= block_size;
 
@@ -670,6 +696,29 @@ TEST(srslte_vec_max_fi,
          for (int i = 0; i < block_size; i++) {
            if (gold_value < x[i]) {
              gold_value = x[i];
+             gold_index = i;
+           }
+         }
+         mse = (gold_index != max_index) ? 1:0;
+
+         free(x);
+)
+
+TEST(srslte_vec_max_abs_fi,
+     MALLOC(float, x);
+
+         for (int i = 0; i < block_size; i++) {
+           x[i] = RANDOM_F();
+         }
+
+         uint32_t max_index = 0;
+         TEST_CALL(max_index = srslte_vec_max_abs_fi(x, block_size);)
+
+         float gold_value = -INFINITY;
+         uint32_t gold_index = 0;
+         for (int i = 0; i < block_size; i++) {
+           if (gold_value < fabsf(x[i])) {
+             gold_value = fabsf(x[i]);
              gold_index = i;
            }
          }
@@ -703,6 +752,80 @@ TEST(srslte_vec_max_abs_ci,
          free(x);
 )
 
+TEST(srslte_vec_apply_cfo,
+     MALLOC(cf_t, x);
+     MALLOC(cf_t, z);
+
+     const float cfo = 0.1f;
+     cf_t gold;
+     for (int i = 0; i < block_size; i++) {
+       x[i] = RANDOM_CF();
+     }
+
+     TEST_CALL(srslte_vec_apply_cfo(x, cfo, z, block_size))
+
+         for (int i = 0; i < block_size; i++) {
+           gold = x[i] * cexpf(_Complex_I * 2.0f * (float) M_PI * i * cfo);
+           mse += cabsf(gold - z[i]) / cabsf(gold);
+         }
+         mse /= block_size;
+
+         free(x);
+         free(z);
+)
+
+TEST(srslte_cfo_correct,
+     srslte_cfo_t srslte_cfo = {0};
+     MALLOC(cf_t, x);
+     MALLOC(cf_t, z);
+
+     const float cfo = 0.1f;
+     cf_t gold;
+     for (int i = 0; i < block_size; i++) {
+       x[i] = RANDOM_CF();
+     }
+
+     srslte_cfo_init(&srslte_cfo, block_size);
+
+     TEST_CALL(srslte_cfo_correct(&srslte_cfo, x, z, cfo))
+
+         for (int i = 0; i < block_size; i++) {
+           gold = x[i] * cexpf(_Complex_I * 2.0f * (float) M_PI * i * cfo);
+           mse += cabsf(gold - z[i]) / cabsf(gold);
+         }
+         mse /= block_size;
+
+         free(x);
+         free(z);
+         srslte_cfo_free(&srslte_cfo);
+)
+
+TEST(srslte_cfo_correct_change,
+     srslte_cfo_t srslte_cfo = {0};
+     MALLOC(cf_t, x);
+     MALLOC(cf_t, z);
+
+     float cfo = 0.1f;
+     cf_t gold;
+     for (int i = 0; i < block_size; i++) {
+       x[i] = RANDOM_CF();
+     }
+
+     srslte_cfo_init(&srslte_cfo, block_size);
+
+     TEST_CALL(cfo = (i%2)?0.1:-0.1; srslte_cfo_correct(&srslte_cfo, x, z, cfo))
+
+         for (int i = 0; i < block_size; i++) {
+           gold = x[i] * cexpf(_Complex_I * 2.0f * (float) M_PI * i * cfo);
+           mse += cabsf(gold - z[i]) / cabsf(gold);
+         }
+         mse /= block_size;
+
+         free(x);
+         free(z);
+         srslte_cfo_free(&srslte_cfo);
+)
+
 int main(int argc, char **argv) {
   char func_names[MAX_FUNCTIONS][32];
   double timmings[MAX_FUNCTIONS][MAX_BLOCKS];
@@ -712,7 +835,7 @@ int main(int argc, char **argv) {
   bool passed[MAX_FUNCTIONS][MAX_BLOCKS];
   bool all_passed = true;
 
-  for (uint32_t block_size = 1; block_size <= 1024*8; block_size *= 2) {
+  for (uint32_t block_size = 1; block_size <= 1024*32; block_size *= 2) {
     func_count = 0;
 
 
@@ -751,6 +874,9 @@ int main(int argc, char **argv) {
     func_count++;
 
     passed[func_count][size_count] = test_srslte_vec_convert_fi(func_names[func_count], &timmings[func_count][size_count], block_size);
+    func_count++;
+
+     passed[func_count][size_count] = test_srslte_vec_convert_if(func_names[func_count], &timmings[func_count][size_count], block_size);
     func_count++;
 
     passed[func_count][size_count] = test_srslte_vec_prod_fff(func_names[func_count], &timmings[func_count][size_count], block_size);
@@ -795,23 +921,37 @@ int main(int argc, char **argv) {
     passed[func_count][size_count] = test_srslte_vec_max_fi(func_names[func_count], &timmings[func_count][size_count], block_size);
     func_count++;
 
+    passed[func_count][size_count] = test_srslte_vec_max_abs_fi(func_names[func_count], &timmings[func_count][size_count], block_size);
+    func_count++;
+
     passed[func_count][size_count] = test_srslte_vec_max_abs_ci(func_names[func_count], &timmings[func_count][size_count], block_size);
+    func_count++;
+
+    passed[func_count][size_count] = test_srslte_vec_apply_cfo(func_names[func_count], &timmings[func_count][size_count], block_size);
+    func_count++;
+
+    passed[func_count][size_count] = test_srslte_cfo_correct(func_names[func_count], &timmings[func_count][size_count], block_size);
+    func_count++;
+
+    passed[func_count][size_count] = test_srslte_cfo_correct_change(func_names[func_count], &timmings[func_count][size_count], block_size);
     func_count++;
 
     sizes[size_count] = block_size;
     size_count++;
   }
 
-  char fname[68];
+  char fname[69];
   FILE *f = NULL;
   void * p = popen("(date +%g%m%d && hostname) | tr '\\r\\n' '__'", "r");
   if (p) {
     fgets(fname, 64, p);
-    strncpy(fname + strnlen(fname, 64) - 1, ".tsv", 4);
+    strncpy(fname + strnlen(fname, 64) - 1, ".tsv", 5);
     f = fopen(fname, "w");
-    if (f) printf("Saving benchmark results in '%s'\n", fname);
+    if (f) {
+      printf("Saving benchmark results in '%s'\n", fname);
+    }
+    pclose(p);
   }
-  pclose(p);
 
 
   printf("\n");

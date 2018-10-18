@@ -25,50 +25,55 @@
  */
 
 #include <boost/algorithm/string.hpp>
-#include <boost/thread/mutex.hpp>
-#include <enb.h>
-#include "enb.h"
+#include "srsenb/hdr/enb.h"
 
 #ifdef HAVE_EMPOWER_AGENT
-#include "agent/empower_agent.h"
+#include "srsenb/hdr/agent/empower_agent.h"
 #else  /* HAVE_EMPOWER_AGENT */
-#include "agent/dummy_agent.h"
+#include "srsenb/hdr/agent/dummy_agent.h"
 #endif /* HAVE_EMPOWER_AGENT */
 
 namespace srsenb {
 
 enb*          enb::instance = NULL;
-boost::mutex  enb_instance_mutex;
-
+pthread_mutex_t enb_instance_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 enb* enb::get_instance(void)
 {
-  boost::mutex::scoped_lock lock(enb_instance_mutex);
+  pthread_mutex_lock(&enb_instance_mutex);
   if(NULL == instance) {
-      instance = new enb();
+    instance = new enb();
   }
+  pthread_mutex_unlock(&enb_instance_mutex);
   return(instance);
 }
 void enb::cleanup(void)
 {
   srslte_dft_exit();
   srslte::byte_buffer_pool::cleanup();
-  boost::mutex::scoped_lock lock(enb_instance_mutex);
+  pthread_mutex_lock(&enb_instance_mutex);
   if(NULL != instance) {
       delete instance;
       instance = NULL;
   }
+  pthread_mutex_unlock(&enb_instance_mutex);
 }
 
-enb::enb()
-    :started(false)
-{
+enb::enb() : started(false) {
   srslte_dft_load();
-  pool = srslte::byte_buffer_pool::get_instance();
+  pool = srslte::byte_buffer_pool::get_instance(ENB_POOL_SIZE);
+
+  logger = NULL;
+  args = NULL;
+
+  bzero(&rf_metrics, sizeof(rf_metrics));
 }
 
 enb::~enb()
 {
+  for (uint32_t i = 0; i < phy_log.size(); i++) {
+    delete (phy_log[i]);
+  }
 }
 
 bool enb::init(all_args_t *args_)
@@ -91,7 +96,7 @@ bool enb::init(all_args_t *args_)
     char tmp[16];
     sprintf(tmp, "PHY%d",i);
     mylog->init(tmp, logger, true);
-    phy_log.push_back((void*) mylog); 
+    phy_log.push_back(mylog);
   }
 
   mac_log.init("MAC ", logger, true);
@@ -101,6 +106,13 @@ bool enb::init(all_args_t *args_)
   gtpu_log.init("GTPU", logger);
   s1ap_log.init("S1AP", logger);
   agent_log.init("AGNT", logger);
+#ifdef HAVE_RAN_SLICER
+  ran_log.init("RAN", logger);
+#endif /* HAVE_RAN_SLICER */
+
+  pool_log.init("POOL", logger);
+  pool_log.set_level(srslte::LOG_LEVEL_ERROR);
+  pool->set_log(&pool_log);
 
   // Init logs
   rf_log.set_level(srslte::LOG_LEVEL_INFO);
@@ -114,6 +126,10 @@ bool enb::init(all_args_t *args_)
   gtpu_log.set_level(level(args->log.gtpu_level));
   s1ap_log.set_level(level(args->log.s1ap_level));
   agent_log.set_level(level(args->log.agent_level));
+#ifdef HAVE_RAN_SLICER
+  /* Intentionally inherits from the agent logging level */
+  ran_log.set_level(level(args->log.agent_level));
+#endif /* HAVE_RAN_SLICER */
 
   for (int i=0;i<args->expert.phy.nof_phy_threads;i++) {
     ((srslte::log_filter*) phy_log[i])->set_hex_limit(args->log.phy_hex_limit);
@@ -125,6 +141,10 @@ bool enb::init(all_args_t *args_)
   gtpu_log.set_hex_limit(args->log.gtpu_hex_limit);
   s1ap_log.set_hex_limit(args->log.s1ap_hex_limit);
   agent_log.set_hex_limit(args->log.agent_hex_limit);
+#ifdef HAVE_RAN_SLICER
+  /* Intentionally inherits from the agent hex level */
+  ran_log.set_hex_limit(args->log.agent_hex_limit);
+#endif /* HAVE_RAN_SLICER */
 
   // Set up pcap and trace
   if(args->pcap.enable)
@@ -210,7 +230,22 @@ bool enb::init(all_args_t *args_)
     fprintf(stderr, "Error parsing DRB configuration\n");
     return false; 
   }
+
+  uint32_t prach_freq_offset = rrc_cfg.sibs[1].sib.sib2.rr_config_common_sib.prach_cnfg.prach_cnfg_info.prach_freq_offset;
+
+  if (prach_freq_offset + 6 > cell_cfg.nof_prb) {
+    fprintf(stderr, "Invalid PRACH configuration: frequency offset=%d outside bandwidth limits\n", prach_freq_offset);
+    return false;
+  }
+
+  if (prach_freq_offset < rrc_cfg.cqi_cfg.nof_prb || prach_freq_offset < rrc_cfg.sr_cfg.nof_prb ) {
+    fprintf(stderr, "Invalid PRACH configuration: frequency offset=%d lower than CQI offset: %d or SR offset: %d\n",
+            prach_freq_offset, rrc_cfg.cqi_cfg.nof_prb, rrc_cfg.sr_cfg.nof_prb);
+    return false;
+  }
+
   rrc_cfg.inactivity_timeout_ms = args->expert.rrc_inactivity_timer;
+  rrc_cfg.enable_mbsfn =  args->expert.enable_mbsfn;
   
   // Copy cell struct to rrc and phy 
   memcpy(&rrc_cfg.cell, &cell_cfg, sizeof(srslte_cell_t));
@@ -221,10 +256,11 @@ bool enb::init(all_args_t *args_)
   mac.init(&args->expert.mac, &cell_cfg, &phy, &rlc, &rrc, &agent, &mac_log);
   rlc.init(&pdcp, &rrc, &mac, &mac, &rlc_log);
   pdcp.init(&rlc, &rrc, &gtpu, &pdcp_log);
-  rrc.init(&rrc_cfg, &phy, &mac, &rlc, &pdcp, &s1ap, &gtpu, &agent, &rrc_log);
+  rrc.init(&rrc_cfg, &phy, &mac, &rlc, &pdcp, &s1ap, &gtpu, &agent, &ran, &rrc_log);
+  agent.init(args->enb.s1ap.enb_id, &rrc, &ran, &agent_log);
   s1ap.init(args->enb.s1ap, &rrc, &s1ap_log);
-  gtpu.init(args->enb.s1ap.gtp_bind_addr, args->enb.s1ap.mme_addr, &pdcp, &gtpu_log);
-  agent.init(args->enb.s1ap.enb_id, &radio, &phy, &mac, &rlc, &pdcp, &rrc, &agent_log);
+  gtpu.init(args->enb.s1ap.gtp_bind_addr, args->enb.s1ap.mme_addr, &pdcp, &gtpu_log, args->expert.enable_mbsfn);
+  ran.init(&mac, &ran_log);
 
   started = true;
   return true;
@@ -239,17 +275,18 @@ void enb::stop()
 {
   if(started)
   {
+    s1ap.stop();
     gtpu.stop();
     phy.stop();
     mac.stop();
-    usleep(100000);
+    usleep(50000);
 
     rlc.stop();
     pdcp.stop();
     rrc.stop();
     agent.stop();
 
-    usleep(1e5);
+    usleep(10000);
     if(args->pcap.enable)
     {
        mac_pcap.close();
@@ -261,6 +298,10 @@ void enb::stop()
 
 void enb::start_plot() {
   phy.start_plot();
+}
+
+void enb::print_pool() {
+  srslte::byte_buffer_pool::get_instance()->print_all_buffers();
 }
 
 bool enb::get_metrics(enb_metrics_t &m)
@@ -303,7 +344,7 @@ void enb::handle_rf_msg(srslte_rf_error_t error)
     str.erase(std::remove(str.begin(), str.end(), '\n'), str.end());
     str.erase(std::remove(str.begin(), str.end(), '\r'), str.end());
     str.push_back('\n');
-    rf_log.info(str);
+    rf_log.info("%s\n", str.c_str());
   }
 }
 

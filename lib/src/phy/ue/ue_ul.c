@@ -294,6 +294,25 @@ void pucch_encode_bits(srslte_uci_data_t *uci_data, srslte_pucch_format_t format
   }
 }
 
+static float limit_norm_factor(srslte_ue_ul_t *q, float norm_factor, cf_t *output_signal)
+{
+  uint32_t p = srslte_vec_max_abs_fi((float*) output_signal, 2*SRSLTE_SF_LEN_PRB(q->cell.nof_prb));
+  float amp = fabsf(*((float*) output_signal + p));
+
+  if (amp*norm_factor > 0.95) {
+    norm_factor = 0.95/amp;
+  }
+  if (amp*norm_factor < 0.1) {
+    norm_factor = 0.1/amp;
+  }
+  q->last_amplitude = norm_factor*amp;
+  return norm_factor;
+}
+
+float srslte_ue_ul_get_last_amplitude(srslte_ue_ul_t *q) {
+  return q->last_amplitude;
+}
+
 /* Choose PUCCH format as in Sec 10.1 of 36.213 and generate PUCCH signal 
  */
 int srslte_ue_ul_pucch_encode(srslte_ue_ul_t *q, srslte_uci_data_t uci_data,
@@ -309,9 +328,7 @@ int srslte_ue_ul_pucch_encode(srslte_ue_ul_t *q, srslte_uci_data_t uci_data,
     
     uint32_t sf_idx = tti%10; 
     ret = SRSLTE_ERROR; 
-    bzero(q->sf_symbols, sizeof(cf_t)*SRSLTE_SF_LEN_RE(q->cell.nof_prb, q->cell.cp));
-    
-    
+
     uint8_t pucch_bits[SRSLTE_PUCCH_MAX_BITS];
     uint8_t pucch2_bits[2];
     bzero(pucch_bits, SRSLTE_PUCCH_MAX_BITS*sizeof(uint8_t));
@@ -355,7 +372,10 @@ int srslte_ue_ul_pucch_encode(srslte_ue_ul_t *q, srslte_uci_data_t uci_data,
     }
     
     if (q->normalize_en) {
-      float norm_factor = (float) 0.8*q->cell.nof_prb/5;
+      float norm_factor = (float) q->cell.nof_prb/15/40;
+
+      norm_factor = limit_norm_factor(q, norm_factor, output_signal);
+
       srslte_vec_sc_prod_cfc(output_signal, norm_factor, output_signal, SRSLTE_SF_LEN_PRB(q->cell.nof_prb));
     }
     ret = SRSLTE_SUCCESS; 
@@ -426,6 +446,9 @@ int srslte_ue_ul_srs_encode(srslte_ue_ul_t *q, uint32_t tti, cf_t *output_signal
     
     if (q->normalize_en) {
       float norm_factor = (float) q->cell.nof_prb/15/sqrtf(srslte_refsignal_srs_M_sc(&q->signals));
+
+      norm_factor = limit_norm_factor(q, norm_factor, output_signal);
+
       srslte_vec_sc_prod_cfc(output_signal, norm_factor, output_signal, SRSLTE_SF_LEN_PRB(q->cell.nof_prb));
     }
     
@@ -444,7 +467,6 @@ int srslte_ue_ul_pusch_encode_rnti_softbuffer(srslte_ue_ul_t *q,
   int ret = SRSLTE_ERROR_INVALID_INPUTS; 
   
   if (q             != NULL &&
-      softbuffer    != NULL &&
       output_signal != NULL) 
   {
 
@@ -494,7 +516,10 @@ int srslte_ue_ul_pusch_encode_rnti_softbuffer(srslte_ue_ul_t *q,
     }
     
     if (q->normalize_en) {
-      float norm_factor = (float) q->cell.nof_prb/15/sqrtf(q->pusch_cfg.grant.L_prb);
+      float norm_factor = (float) q->cell.nof_prb/15/sqrtf(q->pusch_cfg.grant.L_prb)/2;
+
+      norm_factor = limit_norm_factor(q, norm_factor, output_signal);
+
       srslte_vec_sc_prod_cfc(output_signal, norm_factor, output_signal, SRSLTE_SF_LEN_PRB(q->cell.nof_prb));
     }
     
@@ -627,13 +652,12 @@ int srslte_ue_ul_sr_send_tti(uint32_t I_sr, uint32_t current_tti) {
   } else {
     return SRSLTE_ERROR;
   }
-  uint32_t sfn = current_tti/10;
-  uint32_t subf = current_tti%10; 
-  if ((10*sfn+subf-sr_N_offset)%sr_periodicity==0) {
-    return 1; 
-  } else {
-    return SRSLTE_SUCCESS;
+  if (current_tti >= sr_N_offset) {
+    if ((current_tti - sr_N_offset) % sr_periodicity == 0) {
+      return 1;
+    }
   }
+  return SRSLTE_SUCCESS;
 }
 
 

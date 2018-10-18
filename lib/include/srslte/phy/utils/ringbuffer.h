@@ -1,13 +1,15 @@
 
-#ifndef RINGBUFFER_H
-#define RINGBUFFER_H
+#ifndef SRSLTE_RINGBUFFER_H
+#define SRSLTE_RINGBUFFER_H
 
 #include "srslte/config.h"
 #include <pthread.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef struct {
-  uint8_t *buffer; 
+  uint8_t *buffer;
+  bool active;
   int capacity; 
   int count; 
   int wpm; 
@@ -26,6 +28,8 @@ SRSLTE_API void srslte_ringbuffer_reset(srslte_ringbuffer_t *q);
 
 SRSLTE_API int  srslte_ringbuffer_status(srslte_ringbuffer_t *q);
 
+SRSLTE_API int srslte_ringbuffer_space(srslte_ringbuffer_t *q);
+
 SRSLTE_API int  srslte_ringbuffer_write(srslte_ringbuffer_t *q,
                                        void *ptr,
                                        int nof_bytes);
@@ -34,7 +38,8 @@ SRSLTE_API int  srslte_ringbuffer_read(srslte_ringbuffer_t *q,
                                        void *ptr,
                                        int nof_bytes);
 
+SRSLTE_API void srslte_ringbuffer_stop(srslte_ringbuffer_t *q);
 
-#endif
+#endif // SRSLTE_RINGBUFFER_H
 
 

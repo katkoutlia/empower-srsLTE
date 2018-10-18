@@ -28,9 +28,10 @@
 #include <boost/program_options.hpp>
 #include <boost/algorithm/string.hpp>
 #include "srslte/common/bcd_helpers.h"
-#include "mme/mme.h"
-#include "hss/hss.h"
-#include "spgw/spgw.h"
+#include "srslte/common/config_file.h"
+#include "srsepc/hdr/mme/mme.h"
+#include "srsepc/hdr/hss/hss.h"
+#include "srsepc/hdr/spgw/spgw.h"
 
 using namespace std;
 using namespace srsepc;
@@ -52,7 +53,6 @@ typedef struct {
   int           spgw_hex_limit;
   std::string   hss_level;
   int           hss_hex_limit;
-
   std::string   all_level;
   int           all_hex_limit;
   std::string   filename;
@@ -81,8 +81,10 @@ parse_args(all_args_t *args, int argc, char* argv[]) {
   string mcc;
   string mnc;
   string mme_bind_addr;
+  string mme_apn;
   string spgw_bind_addr;
   string sgi_if_addr;
+  string dns_addr;
   string hss_db_file;
   string hss_auth_algo;
   string log_filename;
@@ -105,6 +107,8 @@ parse_args(all_args_t *args, int argc, char* argv[]) {
     ("mme.mcc",             bpo::value<string>(&mcc)->default_value("001"),                          "Mobile Country Code")
     ("mme.mnc",             bpo::value<string>(&mnc)->default_value("01"),                           "Mobile Network Code")
     ("mme.mme_bind_addr",   bpo::value<string>(&mme_bind_addr)->default_value("127.0.0.1"),"IP address of MME for S1 connnection")
+    ("mme.dns_addr",        bpo::value<string>(&dns_addr)->default_value("8.8.8.8"),"IP address of the DNS server for the UEs")
+    ("mme.apn",             bpo::value<string>(&mme_apn)->default_value(""),                   "Set Access Point Name (APN) for data services")
     ("hss.db_file",         bpo::value<string>(&hss_db_file)->default_value("ue_db.csv"),".csv file that stores UE's keys")
     ("hss.auth_algo",       bpo::value<string>(&hss_auth_algo)->default_value("milenage"),"HSS uthentication algorithm.")
     ("spgw.gtpu_bind_addr", bpo::value<string>(&spgw_bind_addr)->default_value("127.0.0.1"),"IP address of SP-GW for the S1-U connection")
@@ -151,23 +155,23 @@ parse_args(all_args_t *args, int argc, char* argv[]) {
       exit(0);
   }
 
-  //Parsing Config File
+  // if no config file given, check users home path
   if (!vm.count("config_file")) {
-      cout << "Error: Configuration file not provided" << endl;
-      cout << "Usage: " << argv[0] << " [OPTIONS] config_file" << endl << endl;
-      exit(0);
-  } else {
-      cout << "Reading configuration file " << config_file << "..." << endl;
-      ifstream conf(config_file.c_str(), ios::in);
-      if(conf.fail()) {
-        cout << "Failed to read configuration file " << config_file << " - exiting" << endl;
-        exit(1);
-      }
-      bpo::store(bpo::parse_config_file(conf, common), vm);
-      bpo::notify(vm);
+    if (!config_exists(config_file, "epc.conf")) {
+      cout << "Failed to read ePC configuration file " << config_file << " - exiting" << endl;
+      exit(1);
+    }
   }
 
-
+  //Parsing Config File
+  cout << "Reading configuration file " << config_file << "..." << endl;
+  ifstream conf(config_file.c_str(), ios::in);
+  if(conf.fail()) {
+    cout << "Failed to read configuration file " << config_file << " - exiting" << endl;
+    exit(1);
+  }
+  bpo::store(bpo::parse_config_file(conf, common), vm);
+  bpo::notify(vm);
 
   //Concert hex strings
   {
@@ -204,6 +208,9 @@ parse_args(all_args_t *args, int argc, char* argv[]) {
   }
 
   args->mme_args.s1ap_args.mme_bind_addr = mme_bind_addr;
+  args->mme_args.s1ap_args.mme_name = mme_name;
+  args->mme_args.s1ap_args.dns_addr = dns_addr;
+  args->mme_args.s1ap_args.mme_apn = mme_apn;
   args->spgw_args.gtpu_bind_addr = spgw_bind_addr;
   args->spgw_args.sgi_if_addr = sgi_if_addr;
   args->hss_args.db_file = hss_db_file;
@@ -240,6 +247,13 @@ parse_args(all_args_t *args, int argc, char* argv[]) {
       args->log_args.hss_hex_limit = args->log_args.all_hex_limit;
     }
   }
+
+  // Check user database
+  if (!config_exists(args->hss_args.db_file, "user_db.csv")) {
+    cout << "Failed to read HSS user database file " << args->hss_args.db_file << " - exiting" << endl;
+    exit(1);
+  }
+
   return;
 }
 
@@ -267,6 +281,8 @@ main (int argc,char * argv[] )
 {  
   cout << endl <<"---  Software Radio Systems EPC  ---" << endl << endl;
   signal(SIGINT, sig_int_handler);
+  signal(SIGTERM, sig_int_handler);
+  signal(SIGKILL, sig_int_handler);
 
   all_args_t args;
   parse_args(&args, argc, argv); 
@@ -304,19 +320,20 @@ main (int argc,char * argv[] )
   spgw_log.init("SPGW",logger);
   spgw_log.set_level(level(args.log_args.spgw_level));
   spgw_log.set_hex_limit(args.log_args.spgw_hex_limit);
-  
-  mme *mme = mme::get_instance();
-  if (mme->init(&args.mme_args, &s1ap_log, &mme_gtpc_log)) {
-    cout << "Error initializing MME" << endl;
-    exit(1);
-  }
+
 
   hss *hss = hss::get_instance();
   if (hss->init(&args.hss_args,&hss_log)) {
     cout << "Error initializing HSS" << endl;
     exit(1);
   }
- 
+
+  mme *mme = mme::get_instance();
+  if (mme->init(&args.mme_args, &s1ap_log, &mme_gtpc_log, hss)) {
+    cout << "Error initializing MME" << endl;
+    exit(1);
+  }
+
   spgw *spgw = spgw::get_instance();
   if (spgw->init(&args.spgw_args,&spgw_log)) {
     cout << "Error initializing SP-GW" << endl;

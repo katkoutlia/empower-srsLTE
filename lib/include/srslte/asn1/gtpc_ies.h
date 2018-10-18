@@ -22,8 +22,8 @@
  *
  */
 
-#ifndef GTPC_IES_H
-#define GTPC_IES_H
+#ifndef SRSLTE_GTPC_IES_H
+#define SRSLTE_GTPC_IES_H
 
 #include "srslte/phy/io/netsource.h"
 
@@ -330,8 +330,30 @@ struct gtpc_pdn_address_allocation_ie
   struct in6_addr ipv6;
 };
 
+/****************************************************************************
+ *
+ * GTP-C Bearer Quality of Service IE
+ * Ref: 3GPP TS 29.274 v10.14.0 Figure 8.15-1
+ *
+ ***************************************************************************/
+struct gtpc_bearer_qos_ie
+{
+  struct {
+    uint8_t pvi : 1;
+    uint8_t spare : 1;
+    uint8_t pl : 4;
+    uint8_t pci : 1;
+    uint8_t spare2 : 1;
+  } arp;
+  uint8_t qci;
+  uint8_t mbr_ul;
+  uint8_t mbr_dl;
+  uint8_t gbr_ul;
+  uint8_t gbr_dl;
+};
+
 //TODO
-//TODO IEs between 8.15 and 8.17 missing
+//TODO IEs between 8.16 and 8.17 missing
 //TODO
 
 /****************************************************************************
@@ -400,7 +422,8 @@ enum gtpc_interface_type
   S2B_U_PGW_GTP_U_INTERFACE
 };
 
-struct gtpc_f_teid_ie
+
+typedef struct gtpc_f_teid_ie
 {
   bool ipv4_present;
   bool ipv6_present;
@@ -408,7 +431,7 @@ struct gtpc_f_teid_ie
   uint32_t teid;
   in_addr_t  ipv4;
   struct in6_addr ipv6; //FIXME
-};
+} gtp_fteid_t;
 
 //TODO
 //TODO IEs between 8.22 and 8.28 missing
@@ -425,4 +448,4 @@ struct gtpc_f_teid_ie
 //locally, according to the rules of  TS 29.274 v10.14.0 Section 7.
 
 } //namespace
-#endif //GTPC_IES_H
+#endif // SRSLTE_GTPC_IES_H

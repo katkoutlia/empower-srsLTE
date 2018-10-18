@@ -25,12 +25,19 @@
 option(ENABLE_EMPOWER_AGENT  "Enable the use of EmPOWER Agent"     ON)
 
 if(ENABLE_EMPOWER_AGENT)
-  message(STATUS "Building srsENB with EmPOWER Agent.")
+  message(STATUS "Building srsENB with EmPOWER Agent")
   add_definitions(-DHAVE_EMPOWER_AGENT)
   
   find_package(Emagent)
   find_package(Emproto)
 endif(ENABLE_EMPOWER_AGENT)
+
+option(ENABLE_RAN_SLICER  "Enable the RAN slicer"                  OFF)
+
+if(ENABLE_RAN_SLICER)
+  message(STATUS "Building srsENB with RAN slicer")
+  add_definitions(-DHAVE_RAN_SLICER)
+endif(ENABLE_RAN_SLICER)
 
 ########################################################################
 # Find dependencies
@@ -55,7 +62,7 @@ include_directories(
     ${EMPOWER_AGENT_INCLUDE_DIRS}
     ${EMPOWER_PROTOCOLS_INCLUDE_DIRS}
     ${SEC_INCLUDE_DIRS}
-    ${PROJECT_SOURCE_DIR}/srsenb/hdr
+    ${PROJECT_SOURCE_DIR}
 )
 
 link_directories(
@@ -68,3 +75,11 @@ link_directories(
 ########################################################################
 add_subdirectory(src)
 add_subdirectory(test)
+
+########################################################################
+# Default configuration files
+########################################################################
+install(FILES enb.conf.example DESTINATION ${DATA_DIR})
+install(FILES drb.conf.example DESTINATION ${DATA_DIR})
+install(FILES rr.conf.example DESTINATION ${DATA_DIR})
+install(FILES sib.conf.example DESTINATION ${DATA_DIR})

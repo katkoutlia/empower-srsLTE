@@ -29,8 +29,8 @@
 
 *******************************************************************************/
 
-#ifndef __LIBLTE_SECURITY_H__
-#define __LIBLTE_SECURITY_H__
+#ifndef SRSLTE_LIBLTE_SECURITY_H
+#define SRSLTE_LIBLTE_SECURITY_H
 
 /*******************************************************************************
                               INCLUDES
@@ -51,6 +51,17 @@
 /*******************************************************************************
                               DECLARATIONS
 *******************************************************************************/
+
+/*********************************************************************
+    Name: compute_OPc
+
+    Description: Computes OPc from OP and K.
+
+    Document Reference: 35.206 v10.0.0 Annex 3
+*********************************************************************/
+LIBLTE_ERROR_ENUM liblte_compute_opc(uint8            *k,
+                                     uint8            *op,
+                                     uint8            *op_c);
 
 /*********************************************************************
     Name: liblte_security_generate_k_asme
@@ -345,4 +356,4 @@ LIBLTE_ERROR_ENUM liblte_security_milenage_f5_star(uint8 *k,
                                                    uint8 *rand,
                                                    uint8 *ak);
 
-#endif /* __LIBLTE_SECURITY_H__ */
+#endif // SRSLTE_LIBLTE_SECURITY_H

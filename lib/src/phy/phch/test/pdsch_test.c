@@ -51,7 +51,7 @@ srslte_cell_t cell = {
   SRSLTE_PHICH_R_1_6    // PHICH resources
 };
 
-char mimo_type_str [32] = "single";
+char mimo_type_str[32] = "single";
 srslte_mimo_type_t mimo_type = SRSLTE_MIMO_TYPE_SINGLE_ANTENNA;
 uint32_t cfi = 1;
 uint32_t mcs[SRSLTE_MAX_CODEWORDS] = {0, 0};
@@ -60,6 +60,7 @@ int rv_idx[SRSLTE_MAX_CODEWORDS] = {0, 1};
 uint16_t rnti = 1234;
 uint32_t nof_rx_antennas = 1;
 bool tb_cw_swap = false;
+bool enable_coworker = false;
 uint32_t pmi = 0;
 char *input_file = NULL; 
 
@@ -79,12 +80,13 @@ void usage(char *prog) {
   printf("\t-a nof_rx_antennas [Default %d]\n", nof_rx_antennas);
   printf("\t-p pmi (multiplex only)  [Default %d]\n", pmi);
   printf("\t-w Swap Transport Blocks\n");
+  printf("\t-j Enable PDSCH decoder coworker\n");
   printf("\t-v [set srslte_verbose to debug, default none]\n");
 }
 
 void parse_args(int argc, char **argv) {
   int opt;
-  while ((opt = getopt(argc, argv, "fmMcsrtRFpnawvx")) != -1) {
+  while ((opt = getopt(argc, argv, "fmMcsrtRFpnawvxj")) != -1) {
     switch(opt) {
     case 'f':
       input_file = argv[optind];
@@ -111,7 +113,8 @@ void parse_args(int argc, char **argv) {
       cfi = atoi(argv[optind]);
       break;
     case 'x':
-      strncpy(mimo_type_str, argv[optind], 32);
+      strncpy(mimo_type_str, argv[optind], sizeof(mimo_type_str)-1);
+      mimo_type_str[sizeof(mimo_type_str)-1] = 0;
       break;
     case 'p':
       pmi = (uint32_t) atoi(argv[optind]);
@@ -128,6 +131,9 @@ void parse_args(int argc, char **argv) {
     case 'w':
       tb_cw_swap = true;
       break;
+    case 'j':
+      enable_coworker = true;
+      break;
     case 'v':
       srslte_verbose++;
       break;
@@ -141,6 +147,7 @@ void parse_args(int argc, char **argv) {
 static uint8_t *data_tx[SRSLTE_MAX_CODEWORDS] = {NULL};
 static uint8_t *data_rx[SRSLTE_MAX_CODEWORDS] = {NULL};
 cf_t *ce[SRSLTE_MAX_PORTS][SRSLTE_MAX_PORTS];
+cf_t *ce_dummy[SRSLTE_MAX_PORTS][SRSLTE_MAX_PORTS];
 srslte_softbuffer_rx_t *softbuffers_rx[SRSLTE_MAX_CODEWORDS];
 srslte_ra_dl_grant_t grant; 
 srslte_pdsch_cfg_t pdsch_cfg; 
@@ -151,7 +158,8 @@ cf_t *rx_sf_symbols[SRSLTE_MAX_PORTS];
 cf_t *tx_slot_symbols[SRSLTE_MAX_PORTS];
 cf_t *rx_slot_symbols[SRSLTE_MAX_PORTS];
 srslte_pdsch_t pdsch_tx, pdsch_rx;
-srslte_ofdm_t ofdm_tx, ofdm_rx; 
+srslte_ofdm_t ofdm_tx[SRSLTE_MAX_PORTS], ofdm_rx[SRSLTE_MAX_PORTS];
+srslte_chest_dl_t chest_dl;
 
 int main(int argc, char **argv) {
   uint32_t i, j, k;
@@ -168,6 +176,7 @@ int main(int argc, char **argv) {
   bzero(&pdsch_rx, sizeof(srslte_pdsch_t));
   bzero(&pdsch_cfg, sizeof(srslte_pdsch_cfg_t));
   bzero(ce, sizeof(cf_t*)*SRSLTE_MAX_PORTS);
+  bzero(ce_dummy, sizeof(cf_t*)*SRSLTE_MAX_PORTS);
   bzero(tx_slot_symbols, sizeof(cf_t*)*SRSLTE_MAX_PORTS);
   bzero(rx_slot_symbols, sizeof(cf_t*)*SRSLTE_MAX_PORTS);
 
@@ -177,21 +186,10 @@ int main(int argc, char **argv) {
     goto quit;
   }
 
-  switch(mimo_type) {
-
-    case SRSLTE_MIMO_TYPE_SINGLE_ANTENNA:
-      cell.nof_ports = 1;
-      break;
-    case SRSLTE_MIMO_TYPE_SPATIAL_MULTIPLEX:
-    case SRSLTE_MIMO_TYPE_CDD:
-      if (nof_rx_antennas < 2) {
-        ERROR("At least two receiving antennas are required");
-        goto quit;
-      }
-    case SRSLTE_MIMO_TYPE_TX_DIVERSITY:
-    default:
-      cell.nof_ports = 2;
-      break;
+  if (mimo_type == SRSLTE_MIMO_TYPE_SINGLE_ANTENNA) {
+    cell.nof_ports = 1;
+  } else {
+    cell.nof_ports = 2;
   }
 
   srslte_ra_dl_dci_t dci;
@@ -223,22 +221,6 @@ int main(int argc, char **argv) {
     return ret;
   }
 
-#ifdef DO_OFDM
-  srslte_ofdm_tx_init(&ofdm_tx, cell.cp, cell.nof_prb);
-  srslte_ofdm_rx_init(&ofdm_rx, cell.cp, cell.nof_prb);
-
-  srslte_ofdm_set_normalize(&ofdm_tx, true);
-  srslte_ofdm_set_normalize(&ofdm_rx, true);
-
-  for (i = 0; i < cell.nof_ports; i++) {
-    tx_sf_symbols[i] = srslte_vec_malloc(sizeof(cf_t) * SRSLTE_SF_LEN_PRB(cell.nof_prb));
-  }
-
-  for (i = 0; i < nof_rx_antennas; i++) {
-    rx_sf_symbols[i] = srslte_vec_malloc(sizeof(cf_t) * SRSLTE_SF_LEN_PRB(cell.nof_prb));
-  }
-#endif /* DO_OFDM */
-
   /* Configure PDSCH */
   if (srslte_pdsch_cfg_mimo(&pdsch_cfg, cell, &grant, cfi, subframe, rv_idx, mimo_type, pmi)) {
     fprintf(stderr, "Error configuring PDSCH\n");
@@ -249,7 +231,12 @@ int main(int argc, char **argv) {
   for (i=0;i<SRSLTE_MAX_PORTS;i++) {
     for (j = 0; j < SRSLTE_MAX_PORTS; j++) {
       ce[i][j] = srslte_vec_malloc(sizeof(cf_t) * NOF_CE_SYMBOLS);
-      if (!ce[i]) {
+      if (!ce[i][j]) {
+        perror("srslte_vec_malloc");
+        goto quit;
+      }
+      ce_dummy[i][j] = srslte_vec_malloc(sizeof(cf_t) * NOF_CE_SYMBOLS);
+      if (!ce_dummy[i][j]) {
         perror("srslte_vec_malloc");
         goto quit;
       }
@@ -264,6 +251,42 @@ int main(int argc, char **argv) {
     }
   }
 
+  for (i = 0; i < cell.nof_ports; i++) {
+    tx_slot_symbols[i] = calloc(SRSLTE_SF_LEN_RE(cell.nof_prb, cell.cp), sizeof(cf_t));
+    if (!tx_slot_symbols[i]) {
+      perror("srslte_vec_malloc");
+      goto quit;
+    }
+  }
+
+#ifdef DO_OFDM
+  for (i = 0; i < cell.nof_ports; i++) {
+    tx_sf_symbols[i] = srslte_vec_malloc(sizeof(cf_t) * SRSLTE_SF_LEN_PRB(cell.nof_prb));
+  }
+
+  for (i = 0; i < nof_rx_antennas; i++) {
+    rx_sf_symbols[i] = srslte_vec_malloc(sizeof(cf_t) * SRSLTE_SF_LEN_PRB(cell.nof_prb));
+  }
+
+  for (k = 0; k < cell.nof_ports; k++) {
+    srslte_ofdm_tx_init(&ofdm_tx[k], cell.cp, tx_slot_symbols[k], tx_sf_symbols[k], cell.nof_prb);
+    srslte_ofdm_set_normalize(&ofdm_tx[k], true);
+  }
+
+  for (k = 0; k < nof_rx_antennas; k++) {
+    srslte_ofdm_rx_init(&ofdm_rx[k], cell.cp, rx_sf_symbols[k], rx_slot_symbols[k], cell.nof_prb);
+    srslte_ofdm_set_normalize(&ofdm_rx[k], true);
+  }
+
+
+  if (srslte_chest_dl_init(&chest_dl, cell.nof_prb)) {
+    goto quit;
+  }
+
+  srslte_chest_dl_set_cell(&chest_dl, cell);
+  srslte_chest_dl_set_smooth_filter_gauss(&chest_dl, 4, 1.0f);
+  srslte_chest_dl_average_subframe(&chest_dl, true);
+#endif /* DO_OFDM */
 
   for (i = 0; i < SRSLTE_MAX_TB; i++) {
     if (grant.tb_en[i]) {
@@ -386,14 +409,6 @@ int main(int argc, char **argv) {
       }
     }
 
-    for (i = 0; i < cell.nof_ports; i++) {
-      tx_slot_symbols[i] = calloc(SRSLTE_SF_LEN_RE(cell.nof_prb, cell.cp), sizeof(cf_t));
-      if (!tx_slot_symbols[i]) {
-        perror("srslte_vec_malloc");
-        goto quit;
-      }
-    }
-
     for (int tb = 0; tb < SRSLTE_MAX_CODEWORDS; tb++) {
       if (grant.tb_en[tb]) {
         for (int byte = 0; byte < grant.mcs[tb].tbs / 8; byte++) {
@@ -431,7 +446,7 @@ int main(int argc, char **argv) {
   #ifdef DO_OFDM
     for (i = 0; i < cell.nof_ports; i++) {
       /* For each Tx antenna modulate OFDM */
-      srslte_ofdm_tx_sf(&ofdm_tx, tx_slot_symbols[i], tx_sf_symbols[i]);
+      srslte_ofdm_tx_sf(&ofdm_tx[i]);
     }
 
     /* combine outputs */
@@ -460,13 +475,18 @@ int main(int argc, char **argv) {
   int r=0;
   srslte_pdsch_set_max_noi(&pdsch_rx, 10);
 
+  if (enable_coworker) {
+    srslte_pdsch_enable_coworker(&pdsch_rx);
+  }
+
   gettimeofday(&t[1], NULL);
   for (k = 0; k < M; k++) {
 #ifdef DO_OFDM
     /* For each Rx antenna demodulate OFDM */
     for (i = 0; i < nof_rx_antennas; i++) {
-      srslte_ofdm_rx_sf(&ofdm_rx, tx_sf_symbols[i], rx_slot_symbols[i]);
+      srslte_ofdm_rx_sf(&ofdm_rx[i]);
     }
+    srslte_chest_dl_estimate_multi(&chest_dl, rx_slot_symbols, ce_dummy, subframe, nof_rx_antennas);
 #endif
     for (i = 0; i < SRSLTE_MAX_CODEWORDS; i++) {
       if (grant.tb_en[i]) {
@@ -516,6 +536,13 @@ int main(int argc, char **argv) {
   ret = SRSLTE_SUCCESS;
 
 quit:
+  for (i = 0; i < cell.nof_ports; i++) {
+    srslte_ofdm_tx_free(&ofdm_tx[i]);
+  }
+  for (i = 0; i < nof_rx_antennas; i++) {
+    srslte_ofdm_rx_free(&ofdm_rx[i]);
+  }
+  srslte_chest_dl_free(&chest_dl);
   srslte_pdsch_free(&pdsch_tx);
   srslte_pdsch_free(&pdsch_rx);
   for (i = 0; i < SRSLTE_MAX_CODEWORDS; i++) {
@@ -543,6 +570,9 @@ quit:
       if (ce[i][j]) {
         free(ce[i][j]);
       }
+      if (ce_dummy[i][j]) {
+        free(ce_dummy[i][j]);
+      }
     }
     if (tx_slot_symbols[i]) {
       free(tx_slot_symbols[i]);
@@ -556,5 +586,6 @@ quit:
   } else {
     printf("Ok\n");
   }
+  srslte_dft_exit();
   exit(ret);
 }

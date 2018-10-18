@@ -24,8 +24,8 @@
  *
  */
   
-#ifndef RF_H 
-#define RF_H
+#ifndef SRSLTE_RF_H 
+#define SRSLTE_RF_H
 
 #include <sys/time.h>
 #include <stdbool.h>
@@ -55,11 +55,20 @@ typedef struct {
   float iq_q; 
 } srslte_rf_cal_t; 
 
+
+typedef struct {
+  double min_tx_gain;
+  double max_tx_gain;
+  double min_rx_gain;
+  double max_rx_gain;
+} srslte_rf_info_t;
+
 typedef struct {
   enum { 
     SRSLTE_RF_ERROR_LATE,
     SRSLTE_RF_ERROR_UNDERFLOW,
     SRSLTE_RF_ERROR_OVERFLOW,
+    SRSLTE_RF_ERROR_RX,
     SRSLTE_RF_ERROR_OTHER
   } type;
   int opt;
@@ -123,6 +132,8 @@ SRSLTE_API double srslte_rf_set_rx_gain_th(srslte_rf_t *h,
 SRSLTE_API double srslte_rf_get_rx_gain(srslte_rf_t *h);
 
 SRSLTE_API double srslte_rf_get_tx_gain(srslte_rf_t *h);
+
+SRSLTE_API srslte_rf_info_t *srslte_rf_get_info(srslte_rf_t *h);
 
 SRSLTE_API void srslte_rf_suppress_stdout(srslte_rf_t *h);
 
@@ -212,5 +223,5 @@ SRSLTE_API int srslte_rf_send_multi(srslte_rf_t *rf,
                                     bool is_start_of_burst,
                                     bool is_end_of_burst);
 
-#endif
+#endif // SRSLTE_RF_H
 

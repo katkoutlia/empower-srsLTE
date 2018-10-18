@@ -71,12 +71,16 @@ int srslte_dci_msg_to_dl_grant(srslte_dci_msg_t *msg, uint16_t msg_rnti,
       //fprintf(stderr, "Can't unpack DCI message %s (%d)\n", srslte_dci_format_string(msg->format), msg->format);
       return ret;
     } 
-    
-    srslte_ra_dl_dci_to_grant(dl_dci, nof_prb, msg_rnti, grant);
 
-    if (SRSLTE_VERBOSE_ISINFO()) {
-      srslte_ra_pdsch_fprint(stdout, dl_dci, nof_prb);
-      srslte_ra_dl_grant_fprint(stdout, grant);
+    if (!dl_dci->is_ra_order) {
+      if (srslte_ra_dl_dci_to_grant(dl_dci, nof_prb, msg_rnti, grant)) {
+        return ret;
+      }
+
+      if (SRSLTE_VERBOSE_ISINFO()) {
+        srslte_ra_pdsch_fprint(stdout, dl_dci, nof_prb);
+        srslte_ra_dl_grant_fprint(stdout, grant);
+      }
     }
 
     ret = SRSLTE_SUCCESS;
@@ -377,7 +381,7 @@ uint32_t srslte_dci_dl_info(char *info_str, uint32_t len, srslte_ra_dl_dci_t *dc
                     dci_msg->type2_alloc.riv,
                     dci_msg->type2_alloc.RB_start, dci_msg->type2_alloc.RB_start+dci_msg->type2_alloc.L_crb-1,
                     dci_msg->type2_alloc.mode==SRSLTE_RA_TYPE2_LOC?"local":"dist");
-      if (dci_msg->type2_alloc.mode==SRSLTE_RA_TYPE2_LOC) {
+      if (dci_msg->type2_alloc.mode==SRSLTE_RA_TYPE2_DIST) {
         n += snprintf(&info_str[n], len-n, ", ngap=%s, nprb1a=%d",
                       dci_msg->type2_alloc.n_gap==SRSLTE_RA_TYPE2_NG1?"ng1":"ng2",
                       dci_msg->type2_alloc.n_prb1a==SRSLTE_RA_TYPE2_NPRB1A_2?2:3);
@@ -391,7 +395,7 @@ uint32_t srslte_dci_dl_info(char *info_str, uint32_t len, srslte_ra_dl_dci_t *dc
   if (dci_msg->tb_en[0]) {
     n += snprintf(&info_str[n], len-n, "%d", dci_msg->mcs_idx);
     if (dci_msg->tb_en[1]) {
-      n += snprintf(&info_str[n], len-n, ",");
+      n += snprintf(&info_str[n], len-n, "/");
     } else {
       n += snprintf(&info_str[n], len-n, "}, ");
     }
@@ -403,7 +407,7 @@ uint32_t srslte_dci_dl_info(char *info_str, uint32_t len, srslte_ra_dl_dci_t *dc
   if (dci_msg->tb_en[0]) {
     n += snprintf(&info_str[n], len-n, "%d", dci_msg->rv_idx);
     if (dci_msg->tb_en[1]) {
-      n += snprintf(&info_str[n], len-n, ",");
+      n += snprintf(&info_str[n], len-n, "/");
     } else {
       n += snprintf(&info_str[n], len-n, "}, ");
     }
@@ -415,7 +419,7 @@ uint32_t srslte_dci_dl_info(char *info_str, uint32_t len, srslte_ra_dl_dci_t *dc
   if (dci_msg->tb_en[0]) {
     n += snprintf(&info_str[n], len-n, "%d", dci_msg->ndi);
     if (dci_msg->tb_en[1]) {
-      n += snprintf(&info_str[n], len-n, ",");
+      n += snprintf(&info_str[n], len-n, "/");
     } else {
       n += snprintf(&info_str[n], len-n, "}, ");
     }
@@ -424,7 +428,8 @@ uint32_t srslte_dci_dl_info(char *info_str, uint32_t len, srslte_ra_dl_dci_t *dc
     n += snprintf(&info_str[n], len - n, "%d}, ", dci_msg->ndi_1);
   }
 
-  if (format == SRSLTE_DCI_FORMAT1 || format == SRSLTE_DCI_FORMAT1A || format == SRSLTE_DCI_FORMAT1B) {
+  if (format == SRSLTE_DCI_FORMAT1 || format == SRSLTE_DCI_FORMAT1A || format == SRSLTE_DCI_FORMAT1B ||
+      format == SRSLTE_DCI_FORMAT2 || format == SRSLTE_DCI_FORMAT2A || format == SRSLTE_DCI_FORMAT2B) {
     n += snprintf(&info_str[n], len-n, "tpc_pucch=%d, ", dci_msg->tpc_pucch);
   }
   if (format == SRSLTE_DCI_FORMAT2 || format == SRSLTE_DCI_FORMAT2A || format == SRSLTE_DCI_FORMAT2B) {
@@ -575,7 +580,7 @@ int dci_format0_unpack(srslte_dci_msg_t *msg, srslte_ra_ul_dci_t *data, uint32_t
     return SRSLTE_ERROR;
   }
   if (*y++ != 0) {
-    INFO("DCI message is Format1A\n", 0);
+    INFO("DCI message is Format1A\n");
     return SRSLTE_ERROR;
   }
   if (*y++ == 0) {
@@ -834,7 +839,7 @@ int dci_format1As_unpack(srslte_dci_msg_t *msg, srslte_ra_dl_dci_t *data, uint32
   }
 
   if (*y++ != 1) {
-    INFO("DCI message is Format0\n", 0);
+    INFO("DCI message is Format0\n");
     return SRSLTE_ERROR;
   }
   
@@ -844,20 +849,30 @@ int dci_format1As_unpack(srslte_dci_msg_t *msg, srslte_ra_dl_dci_t *data, uint32
   if (*y == 0) {
     int nof_bits = riv_nbits(nof_prb);
     int i=0;
-    while(i<nof_bits && y[1+i] == 1)
+    // Check all bits in RBA are set to 1
+    while(i<nof_bits && y[1+i] == 1) {
       i++;
+    }
     if (i == nof_bits) {
-      //printf("Warning check me: could this be a RA PDCCH order??\n");
+      // Check all remaining bits are set to 0
       i=1+10+nof_bits;
       while(i<msg->nof_bits-1 && y[i] == 0) {
         i++;
       }
       if (i == msg->nof_bits-1) {
-        //printf("Received a Format1A RA PDCCH order. Not implemented!\n");
-        return SRSLTE_ERROR;
+        // This is a Random access order
+        y+=1+nof_bits;
+
+        data->is_ra_order = true;
+        data->ra_preamble = srslte_bit_pack(&y, 6);
+        data->ra_mask_idx = srslte_bit_pack(&y, 4);
+
+        return SRSLTE_SUCCESS;
       }
     }
   }
+
+  data->is_ra_order = false;
 
   data->alloc_type = SRSLTE_RA_ALLOC_TYPE2;
   data->type2_alloc.mode = *y++;

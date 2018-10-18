@@ -24,13 +24,13 @@
  *
  */
 
-#ifndef ENBPHYWORKER_H
-#define ENBPHYWORKER_H
+#ifndef SRSENB_PHCH_WORKER_H
+#define SRSENB_PHCH_WORKER_H
 
 #include <string.h>
 
 #include "srslte/srslte.h"
-#include "phy/phch_common.h"
+#include "phch_common.h"
 
 #define LOG_EXECTIME
 
@@ -71,11 +71,12 @@ public:
 private: 
   
   const static float PUSCH_RL_SNR_DB_TH = 1.0; 
-  const static float PUCCH_RL_CORR_TH = 0.1; 
+  const static float PUCCH_RL_CORR_TH = 0.15;
   
   void work_imp();
   
   int encode_pdsch(srslte_enb_dl_pdsch_t *grants, uint32_t nof_grants);
+  int encode_pmch(srslte_enb_dl_pdsch_t *grant, srslte_ra_dl_grant_t *phy_grant);
   int decode_pusch(srslte_enb_ul_pusch_t *grants, uint32_t nof_pusch);
   int encode_phich(srslte_enb_dl_phich_t *acks, uint32_t nof_acks);
   int encode_pdcch_dl(srslte_enb_dl_pdsch_t *grants, uint32_t nof_grants);
@@ -96,14 +97,18 @@ private:
   uint32_t       t_rx, t_tx_dl, t_tx_ul;
   srslte_enb_dl_t enb_dl;
   srslte_enb_ul_t enb_ul;
-  
+  srslte_softbuffer_tx_t temp_mbsfn_softbuffer;
   srslte_timestamp_t tx_time;
 
   // Class to store user information 
   class ue {
   public:
     ue() : I_sr(0), I_sr_en(false), cqi_en(false), pucch_cqi_ack(false), pmi_idx(0), has_grant_tti(0),
-           dedicated_ack(false) {bzero(&metrics, sizeof(phy_metrics_t));}
+           dedicated_ack(false), ri_idx(0), ri_en(false), rnti(0) {
+      bzero(&dedicated, sizeof(LIBLTE_RRC_PHYSICAL_CONFIG_DEDICATED_STRUCT));
+      bzero(&phich_info, sizeof(srslte_enb_ul_phich_info_t));
+      bzero(&metrics, sizeof(phy_metrics_t));
+    }
     uint32_t I_sr; 
     uint32_t pmi_idx;
     uint32_t ri_idx;
@@ -128,10 +133,11 @@ private:
   std::map<uint16_t,ue> ue_db;   
   
   // mutex to protect worker_imp() from configuration interface 
-  pthread_mutex_t mutex; 
+  pthread_mutex_t mutex;
+  bool is_worker_running;
 };
 
 } // namespace srsenb
 
-#endif // ENBPHYWORKER_H
+#endif // SRSENB_PHCH_WORKER_H
 

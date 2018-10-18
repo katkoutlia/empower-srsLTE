@@ -5,7 +5,7 @@
  *
  * \section COPYRIGHT
  *
- * Copyright 2013-2017 Software Radio Systems Limited
+ * Copyright 2013-2018 Software Radio Systems Limited
  *
  * \section LICENSE
  *
@@ -29,25 +29,25 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
-#include <boost/thread/mutex.hpp>
 #include <emage/emage.h>
 #include <emage/emproto.h>
 
 #include "srslte/srslte.h"
 #include "srslte/asn1/liblte_rrc.h"
 
-#include "enb.h"
-
-#include "agent/empower_agent.h"
+#include "srsenb/hdr/enb.h"
+#include "srsenb/hdr/agent/empower_agent.h"
 
 #define EMPOWER_AGENT_BUF_SMALL_SIZE          2048
 
@@ -71,20 +71,68 @@
     m_logger->debug("AGENT: "fmt, ##__VA_ARGS__);   \
   } while(0)
 
-#define RSRP_RANGE_TO_VALUE(x)	((float)x - 140.0f)
-#define RSRQ_RANGE_TO_VALUE(x)	(((float)x / 2) - 20.0f)
+#define Lock(x)                                     \
+  do {                                              \
+    pthread_spin_lock(x);                           \
+  } while(0)
 
-/* Dif "b-a" two timespec structs and return such value in ms.*/
-#define ts_diff_to_ms(a, b) 			\
-	(((b.tv_sec - a.tv_sec) * 1000) +	\
-	 ((b.tv_nsec - a.tv_nsec) / 1000000))
+#define Unlock(x)                                   \
+  do {                                              \
+    pthread_spin_unlock(x);                         \
+  } while(0)
+
+/******************************************************************************
+ *                                                                            *
+ *                              Generic routines                              *
+ *                                                                            *
+ ******************************************************************************/
+
+/* Routine:
+ *    time_diff
+ * 
+ * Abstract:
+ *    Performs the difference between two 'timespec' structures. The result is
+ *    translated to milliseconds.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - a, first timespec structure
+ *    - b, second timespec structure
+ * 
+ * Returns:
+ *    The difference of the operation 'b-a', translated from nanoseconds to
+ *    milliseconds.
+ */
+#define time_diff(a, b)               \
+  (((b.tv_sec - a.tv_sec) * 1000) +   \
+  ((b.tv_nsec - a.tv_nsec) / 1000000))
+
+/******************************************************************************
+ *                                                                            *
+ *                            Agent UE procedures                             *
+ *                                                                            *
+ ******************************************************************************/
 
 namespace srsenb {
 
-/******************************************************************************
- * Agent UE procedures.                                                       *
- ******************************************************************************/
-
+/* Routine:
+ *    em_ue::em_ue
+ * 
+ * Abstract:
+ *    Performs initialization of an em_ue class instance. The class is used
+ *    internally in 'empower_agent' context and should not be exposed.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
 empower_agent::em_ue::em_ue()
 {
   m_imsi         = 0;
@@ -98,88 +146,101 @@ empower_agent::em_ue::em_ue()
 }
 
 /******************************************************************************
- * Agent callback system.                                                     *
+ *                                                                            *
+ *                              Agent callbacks                               *
+ *                                                                            *
  ******************************************************************************/
 
-/* NOTE: This can hold only one reference of agent. If you plan to go with more
- * consider using a map enb_id --> agent instance.
+/* Variable:
+ *    em_agent
+ * 
+ * Abstract:
+ *    Provides static pointer to singleton instance of the Agent. Using more
+ *    than one agent in srsLTE is currently not supported and makes no sense.
+ *    This pointer is initialized during 'empower_agent' initialization stage.
+ * 
+ *    This element is protected by static 'em_agent_lock', which is used only
+ *    for this purpose.
+ * 
+ * Assumptions:
+ *    Initialized once.
  */
 static empower_agent * em_agent = 0;
+pthread_mutex_t        em_agent_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Routine:
+ *    ea_disconnected
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of disconnection with
+ *    the controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
 static int ea_disconnected()
 {
 	return em_agent->reset();
 }
 
-static int ea_cell_setup(uint32_t mod, uint16_t pci)
-{
-  char        buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
-  ep_cell_det cell;
-  int         blen;
-
-  all_args_t * args = enb::get_instance()->get_args();
-
-  if(pci != (uint16_t)args->enb.pci) {
-    blen = epf_single_ccap_rep(
-      buf,
-      EMPOWER_AGENT_BUF_SMALL_SIZE,
-      em_agent->get_id(),
-      cell.pci,
-      mod,
-      &cell);
-
-    if(blen < 0) {
-      return -1;
-    }
-
-    return em_send(em_agent->get_id(), buf, blen);
-  }
-
-  cell.cap       = EP_CCAP_NOTHING;
-  cell.pci       = (uint16_t)args->enb.pci;
-  cell.DL_earfcn = (uint16_t)args->rf.dl_earfcn;
-  cell.UL_earfcn = (uint16_t)args->rf.ul_earfcn;
-  cell.DL_prbs   = (uint8_t) args->enb.n_prb;
-  cell.UL_prbs   = (uint8_t) args->enb.n_prb;
-
-  blen = epf_single_ccap_rep(
-    buf,
-    EMPOWER_AGENT_BUF_SMALL_SIZE,
-    em_agent->get_id(),
-    cell.pci,
-    mod,
-    &cell);
-
-  if(blen < 0) {
-    return -1;
-  }
-
-  return em_send(em_agent->get_id(), buf, blen);
-}
-
+/* Routine:
+ *    ea_enb_setup
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of eNB setup request 
+ *    from the controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which requested the report
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
 static int ea_enb_setup(uint32_t mod)
 {
-  char        buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
-  ep_cell_det cells[1];
-  int         blen;
-
+  char         buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
+  ep_enb_det   enbd;
+  int          blen;
   all_args_t * args  = enb::get_instance()->get_args();
 
-  cells[0].cap       = EP_CCAP_NOTHING;
-  cells[0].pci       = (uint16_t)args->enb.pci;
-  cells[0].DL_earfcn = (uint16_t)args->rf.dl_earfcn;
-  cells[0].UL_earfcn = (uint16_t)args->rf.ul_earfcn;
-  cells[0].DL_prbs   = (uint8_t) args->enb.n_prb;
-  cells[0].UL_prbs   = (uint8_t) args->enb.n_prb;
+  enbd.cells[0].feat      = 
+    EP_CCAP_UE_REPORT | EP_CCAP_UE_MEASURE | EP_CCAP_CELL_MEASURE;
+
+  enbd.cells[0].pci       = (uint16_t)args->enb.pci;
+  enbd.cells[0].DL_earfcn = (uint16_t)args->rf.dl_earfcn;
+  enbd.cells[0].UL_earfcn = (uint16_t)args->rf.ul_earfcn;
+  enbd.cells[0].DL_prbs   = (uint8_t) args->enb.n_prb;
+  enbd.cells[0].UL_prbs   = (uint8_t) args->enb.n_prb;
+  enbd.cells[0].max_ues   = 2;
+
+  enbd.nof_cells          = 1;
+
+#ifdef HAVE_RAN_SLICER
+  enbd.ran[0].pci                = (uint16_t)args->enb.pci;
+  enbd.ran[0].l1_mask            = 0;
+  enbd.ran[0].l2_mask            = EP_RAN_LAYER2_CAP_RBG_SLICING;
+  enbd.ran[0].l3_mask            = 0;
+  enbd.ran[0].l2.mac.slice_sched = em_agent->get_ran()->get_slice_sched();
+  enbd.ran[0].max_slices         = 8;
+
+  enbd.nof_ran                   = 1;
+#endif
 
   blen = epf_single_ecap_rep(
     buf, EMPOWER_AGENT_BUF_SMALL_SIZE,
     em_agent->get_id(),
-    0,
-    0,
-    EP_ECAP_UE_REPORT,
-    cells,
-    1);
+    0, // Response coming from eNB, and not from a cell in particular
+    mod,
+    &enbd);
 
   if(blen < 0) {
     return -1;
@@ -188,6 +249,29 @@ static int ea_enb_setup(uint32_t mod)
   return em_send(em_agent->get_id(), buf, blen);
 }
 
+/* Routine:
+ *    ea_ue_measure
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of UE measurement from
+ *    the controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which requested the report
+ *    - trig_id, ID of the assigned trigger
+ *    - measure_id, ID of the measurement
+ *    - rnti, target UE which should perform the measurements
+ *    - earfcn, frequency where to operate the measurement
+ *    - interval, interval of the measurement in ms
+ *    - max_cells, maximum amount of cell to consider
+ *    - max_meas, maximum amount of measurements to send back
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
 static int ea_ue_measure(
   uint32_t mod,
   int      trig_id,
@@ -198,18 +282,263 @@ static int ea_ue_measure(
   int16_t  max_cells,
   int16_t  max_meas)
 {
-  char        buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
-  int         blen;
-
   if(em_agent->setup_UE_period_meas(
-    measure_id, trig_id, rnti, mod, earfcn, max_cells, max_meas, interval)) {
+    measure_id, trig_id, rnti, mod, earfcn, max_cells, max_meas, interval)) 
+  {
+    /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     * TODO:
+     * Due the inability of the controller to handle errors, error reporting
+     * here is suppressed. This NEEDS to be changed, but we need controller
+     * support first!
+     * !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     */
+    return 0;
+  }
 
-    blen = epf_trigger_uemeas_rep_fail(
-      buf,
+  return 0;
+}
+
+/* Routine:
+ *    ea_mac_report
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of MAC report from
+ *    the controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which requested the report
+ *    - interval, interval of the measurement in ms
+ *    - trig_id, ID of the assigned trigger
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
+static int ea_mac_report(
+  uint32_t mod,
+  int32_t  interval,
+  int      trig_id)
+{
+  /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   * TODO:
+   * Due the inability of the controller to handle errors, error reporting
+   * here is suppressed. This NEEDS to be changed, but we need controller
+   * support first!
+   * !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   */
+  return em_agent->setup_MAC_report(mod, interval, trig_id);
+}
+
+/* Routine:
+ *    ea_ue_report
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of UE report from the
+ *    controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which requested the report
+ *    - trig_id, ID of the assigned trigger
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
+static int ea_ue_report(uint32_t mod, int trig_id)
+{
+  /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   * TODO:
+   * Due the inability of the controller to handle errors, error reporting
+   * here is suppressed. This NEEDS to be changed, but we need controller
+   * support first!
+   * !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   */
+  return em_agent->setup_UE_report(mod, trig_id);
+}
+
+#ifdef HAVE_RAN_SLICER
+
+/* Routine:
+ *    slice_feedback
+ * 
+ * Abstract:
+ *    Send a complete report of all the slices currently registered in the RAN
+ *    subsystem, and about user associated with them.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which will receive the report
+ * 
+ * Returns:
+ *    ---
+ */
+static void slice_feedback(uint32_t mod)
+{ 
+  char             buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
+  int              blen;
+  all_args_t *     args = enb::get_instance()->get_args();
+
+  int              i;
+  uint64_t         slices[32];
+  uint16_t         nof_slices;
+  
+  ep_ran_slice_det det;
+  ran_interface_common::slice_args slice_inf;
+
+  // User memory allocated for det, this way we directly save them there
+  slice_inf.users     = det.users;
+  slice_inf.nof_users = det.nof_users;
+
+  nof_slices = em_agent->get_ran()->get_slices(32, slices);
+
+  if(nof_slices > 0) {
+    for(i = 0; i < nof_slices; i++) {
+      /* Do not report the default slice */
+      if(slices[i] == RAN_DEFAULT_SLICE) {
+        continue;
+      }
+
+      det.nof_users = EP_RAN_USERS_MAX;
+
+      if(em_agent->get_ran()->get_slice_info(slices[i], &slice_inf)) {
+        continue;
+      }
+
+      // Update values that will be sent to controller 
+      det.l2.usched = slice_inf.l2.mac.user_sched;
+      det.l2.rbgs   = slice_inf.l2.mac.rbg;
+      det.nof_users = slice_inf.nof_users;
+
+      blen = epf_single_ran_slice_rep(
+        buf, 
+        EMPOWER_AGENT_BUF_SMALL_SIZE,
+        em_agent->get_id(),
+        (uint16_t)args->enb.pci,
+        mod,
+        slices[i],
+        &det);
+
+      if(blen > 0) {
+        em_send(em_agent->get_id(), buf, blen);
+      }
+    }
+  }
+}
+#if 0
+/* Routine:
+ *    ea_ran_setup_request
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of RAN setup from the
+ *    controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which will receive the report
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
+static int ea_ran_setup_request(uint32_t mod)
+{
+  char         buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
+  int          blen;
+  ep_ran_det   det;
+  all_args_t * args  = enb::get_instance()->get_args();
+
+  det.l1_mask = 0;
+  // We can perform PRB slicing at MAC layer
+  det.l2_mask = EP_RAN_LAYER2_CAP_PRB_SLICING;
+  det.l3_mask = 0;
+  // This should retrieved in a way like em_agent->ran_get_slice_id()
+  det.l2.mac.slice_sched = 1;
+
+  blen = epf_single_ran_setup_rep(
+    buf, 
+    EMPOWER_AGENT_BUF_SMALL_SIZE,
+    em_agent->get_id(),
+    (uint16_t)args->enb.pci,
+    mod,
+    &det);
+
+  if(blen > 0) {
+    em_send(em_agent->get_id(), buf, blen);
+  }
+
+  return 0;
+}
+#endif
+/* Routine:
+ *    ea_slice_request
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of RAN slice from the
+ *    controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which will receive the report
+ *    - slice, Id of the slice requested
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
+static int ea_slice_request(uint32_t mod, uint64_t slice)
+{
+  char             buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
+  int              blen;
+  all_args_t *     args  = enb::get_instance()->get_args();
+  
+  uint16_t         i;
+  uint64_t         slices[32];
+  uint16_t         nof_slices;
+
+  ep_ran_slice_det det;
+  ran_interface_common::slice_args slice_inf;
+
+  em_agent->setup_RAN_report(mod);
+
+  // Request all the slices setup
+  if(slice == 0) {
+    // Straight send the slices statuses, regardless of the ID requested
+    slice_feedback(mod);
+
+    return 0;
+  }
+
+  // Request a particular slice which is not the default one
+  if(slice != RAN_DEFAULT_SLICE) {
+    det.nof_users = 16;
+    
+    // User memory allocated for det, this way we directly save them there
+    slice_inf.users     = det.users;
+    slice_inf.nof_users = det.nof_users;
+
+    em_agent->get_ran()->get_slice_info(slice, &slice_inf);
+    
+    // Update values that will be sent to controller 
+    det.l2.usched = slice_inf.l2.mac.user_sched;
+    det.l2.rbgs   = slice_inf.l2.mac.rbg;
+    det.nof_users = slice_inf.nof_users;
+
+    blen = epf_single_ran_slice_rep(
+      buf, 
       EMPOWER_AGENT_BUF_SMALL_SIZE,
       em_agent->get_id(),
-      0,
-      mod);
+      (uint16_t)args->enb.pci,
+      mod,
+      slice,
+      &det);
 
     if(blen > 0) {
       em_send(em_agent->get_id(), buf, blen);
@@ -219,123 +548,360 @@ static int ea_ue_measure(
   return 0;
 }
 
-static int ea_mac_report(
-  uint32_t mod,
-  int32_t  interval,
-  int      trig_id)
+/* Routine:
+ *    ea_slice_add
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of RAN slice addition
+ *    from the controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which will receive the report
+ *    - slice, ID of the slice
+ *    - conf, slice configuration
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
+int ea_slice_add(uint32_t mod, uint64_t slice, em_RAN_conf * conf)
 {
-  return em_agent->setup_MAC_report(mod, interval, trig_id);
+  char               buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
+  int                blen;
+  int                i;
+  uint16_t           usr[32] = { 0 };
+  all_args_t *       args    = enb::get_instance()->get_args();
+
+  ep_ran_slice_det   sdet;
+
+  ran_interface_common::slice_args slice_inf;
+
+  slice_inf.l2.mac.user_sched = conf->l2.user_sched;
+  slice_inf.l2.mac.rbg        = conf->l2.rbg;
+  slice_inf.l2.mac.time       = 1; // 1 subframe decisions
+  slice_inf.nof_users         = 0;
+
+  for(i = 0; i < conf->nof_users && i < 32; i++) {
+    usr[i] = conf->users[i];
+    slice_inf.nof_users++;
+  }
+  
+  slice_inf.users     = usr;
+  //slice_inf.nof_users = conf->nof_users;
+
+  // PLMN is used in the slice ID for this moment
+  if(em_agent->get_ran()->add_slice(slice, ((slice >> 32) & 0x00ffffff))) {
+//printf("Cannot add slice %" PRIu64 "\n", slice); // <-------------------------------------------------------------------
+    /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     * TODO:
+     * Due the inability of the controller to handle errors, error reporting
+     * here is suppressed. This NEEDS to be changed, but we need controller
+     * support first!
+     * !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     */
+    return 0;
+  }
+//printf("Added slice %" PRIu64 "\n", slice); // <------------------------------------------------------------------------
+  // Set the slice with it's starting configuration
+  if(em_agent->get_ran()->set_slice(slice, &slice_inf)) {
+//printf("Cannot set slice %" PRIu64 "\n", slice); // <-------------------------------------------------------------------
+    /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     * TODO:
+     * Due the inability of the controller to handle errors, error reporting
+     * here is suppressed. This NEEDS to be changed, but we need controller
+     * support first!
+     * !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     */
+    return 0;
+  }
+//printf("Set slice %" PRIu64 "\n", slice); // <--------------------------------------------------------------------------
+  slice_feedback(mod);
+
+  return 0;
 }
 
-static int ea_ue_report(uint32_t mod, int trig_id)
+/* Routine:
+ *    ea_slice_rem
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of RAN slice removal
+ *    from the controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which will receive the report
+ *    - slice, ID of the slice
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
+static int ea_slice_rem(uint32_t mod, uint64_t slice) 
 {
-  return em_agent->setup_UE_report(mod, trig_id);
+  char               buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
+  int                blen;
+
+  em_agent->get_ran()->rem_slice(slice);
+  slice_feedback(mod);
+
+  return 0;
 }
 
+/* Routine:
+ *    ea_slice_conf
+ * 
+ * Abstract:
+ *    Performs operations that must be executed in case of RAN slice
+ *    configuration from the controller.
+ * 
+ * Assumptions:
+ *    'em_agent' pointer is valid. No atomic operations are necessary here.
+ * 
+ * Arguments:
+ *    - mod, Module ID which will receive the report
+ *    - slice, ID of the slice
+ *    - conf, new configuration for the slice
+ * 
+ * Returns:
+ *    See emage.h for return value behavior
+ */
+static int ea_slice_conf(uint32_t mod, uint64_t slice, em_RAN_conf * conf)
+{
+  char               buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
+  int                blen;
+  int                i;
+  uint16_t           usr[32] = { 0 };
+  all_args_t *       args    = enb::get_instance()->get_args();
+
+  ran_interface_common::slice_args slice_inf;
+
+  slice_inf.l2.mac.user_sched = (uint32_t)conf->l2.user_sched;
+  slice_inf.l2.mac.rbg        = (uint16_t)conf->l2.rbg;
+  slice_inf.l2.mac.time       = 1;  // 1 subframe decisions
+
+  for(i = 0; i < conf->nof_users; i++) {
+    usr[i] = conf->users[i];
+  }
+  
+  slice_inf.users     = usr;
+  slice_inf.nof_users = (uint32_t)conf->nof_users;
+
+  // This is getting ridiculous... set for doing everything...
+  em_agent->get_ran()->add_slice(slice, ((slice >> 32) & 0x00ffffff));
+
+  if(em_agent->get_ran()->set_slice(slice, &slice_inf)) {
+//printf("Slice %" PRIu64 " does not exists!\n", slice); // <-------------------------------------------------------------
+    /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     * TODO:
+     * Due the inability of the controller to handle errors, error reporting
+     * here is suppressed. This NEEDS to be changed, but we need controller
+     * support first!
+     * !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     */
+    return 0;
+  }
+//printf("Set slice %" PRIu64 "\n", slice); // <--------------------------------------------------------------------------
+  slice_feedback(mod);
+
+  return 0;
+}
+
+#endif // HAVE_RAN_SLICER
+
+/* Variable:
+ *    empower_agent_ops
+ * 
+ * Abstract:
+ *    Provides callback of how this agent implementation reacts to events 
+ *    incoming from the controller.
+ * 
+ * Assumptions:
+ *    ---
+ */
 static struct em_agent_ops empower_agent_ops = {
-  .init               = 0,
-  .release            = 0,
-  .disconnected       = ea_disconnected,
-  .cell_setup_request = ea_cell_setup,
-  .enb_setup_request  = ea_enb_setup,
-  .ue_report          = ea_ue_report,
-  .ue_measure         = ea_ue_measure,
-  .handover_UE        = 0,
-  .mac_report         = ea_mac_report,
+  0,                      /* init */
+  0,                      /* release */
+  ea_disconnected,        /* disconnected*/
+  ea_enb_setup,           /* enb_setup_request*/
+  ea_ue_report,           /* ue_report*/
+  ea_ue_measure,          /* UE measurement */
+  0,                      /* handover_UE*/
+  ea_mac_report,          /* mac_report*/
+  {
+#ifdef HAVE_RAN_SLICER
+    //ea_ran_setup_request, /* ran.setup_request */
+    0,
+    ea_slice_request,     /* ran.slice_request */
+    ea_slice_add,         /* ran.slice_add */
+    ea_slice_rem,         /* ran.slice_rem */
+    ea_slice_conf         /* ran.slice_conf */
+#else // HAVE_RAN_SLICER
+    0,                    /* ran.setup_request */
+    0,                    /* ran.slice_request */
+    0,                    /* ran.slice_add */
+    0,                    /* ran.slice_rem */
+    0                     /* ran.slice_conf */
+#endif // HAVE_RAN_SLICER
+  }
 };
 
 /******************************************************************************
- * Constructor/destructors.                                                   *
+ *                                                                            *
+ *                                Agent class                                 *
+ *                                                                            *
  ******************************************************************************/
 
+/* Routine:
+ *    empower_agent::empower_agent
+ * 
+ * Abstract:
+ *    Performs operation on a new instance of the agent.
+ *    Mainly variable initialization.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
 empower_agent::empower_agent()
 {
-  m_id       = -1;
-  m_state    = AGENT_STATE_STOPPED;
+  m_id           = -1;
+  m_state        = AGENT_STATE_STOPPED;
 
-  m_rf       = 0;
-  m_phy      = 0;
-  m_mac      = 0;
-  m_rlc      = 0;
-  m_pdcp     = 0;
-  m_rrc      = 0;
-  m_logger   = 0;
+  m_rrc          = 0;
+  m_ran          = 0;
+  m_logger       = 0;
 
-  m_args     = 0;
+  m_args         = 0;
 
-  m_uer_mod  = 0;
-  m_uer_feat = 0;
-  m_uer_tr   = 0;
+  m_uer_mod      = 0;
+  m_uer_feat     = 0;
+  m_uer_tr       = 0;
 
-  m_ues_dirty= 0;
-  m_nof_ues  = 0;
+  m_ues_dirty    = 0;
+  m_nof_ues      = 0;
 
+  memset(m_macrep, 0, sizeof(macrep) *  EMPOWER_AGENT_MAX_MACREP);
   m_DL_prbs_used = 0;
   m_DL_sf        = 0;
-
   m_UL_prbs_used = 0;
   m_UL_sf        = 0;
 
-  memset(m_macrep, 0, sizeof(macrep) *  EMPOWER_AGENT_MAX_MACREP);
+  m_RAN_feat     = 0;
+  m_RAN_def_dirty= 0;
+  m_RAN_mod      = 0;
 
-  m_thread   = 0;
+  m_thread       = 0;
 }
 
+/* Routine:
+ *    empower_agent::~empower_agent
+ * 
+ * Abstract:
+ *    Performs operation to release an instance of the agent
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
 empower_agent::~empower_agent()
 {
   release();
 }
 
-/******************************************************************************
- * Generic purposes procedures.                                               *
- ******************************************************************************/
-
+/* Routine:
+ *    empower_agent::get_id
+ * 
+ * Abstract:
+ *    Get this agent instance id.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ID of the agent.
+ */
 unsigned int empower_agent::get_id()
 {
   return m_id;
 }
 
-int empower_agent::init(
-  int             enb_id,
-  srslte::radio * rf,
-  srsenb::phy *   phy,
-  srsenb::mac *   mac,
-  srsenb::rlc *   rlc,
-  srsenb::pdcp *  pdcp,
-  srsenb::rrc *   rrc,
-  srslte::log *   logger)
+/* Routine:
+ *    empower_agent::get_ran
+ * 
+ * Abstract:
+ *    Get this agent RAN interface
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    A pointer to the RAN subsystem, otherwise a null pointer on errors
+ */
+ran_interface_common * empower_agent::get_ran()
 {
-  if(!rf || !phy || !mac || !rlc || !pdcp || !rrc || !logger) {
-    return -EINVAL;
+  return m_ran;
+}
+
+/* Routine:
+ *    empower_agent::init
+ * 
+ * Abstract:
+ *    Initializes the agent instance and its subsystems. This call allow the 
+ *    agent to become operational and response to local and network events.
+ * 
+ *    Initialization steps also fills static singleton variables here.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    0 on success, otherwise a negative error code
+ */
+int empower_agent::init(
+  int                    enb_id, 
+  rrc_interface_agent *  rrc, 
+  ran_interface_common * ran, 
+  srslte::log *          logger)
+{
+  if(!rrc || !logger) {
+    return -1;
   }
 
   m_id    = enb_id;
-
-  m_rf    = rf;
-  m_phy   = phy;
-  m_mac   = mac;
-  m_rlc   = rlc;
-  m_pdcp  = pdcp;
   m_rrc   = rrc;
+  m_ran   = ran;
   m_logger= logger;
-
   m_args  = enb::get_instance()->get_args();
-
   pthread_spin_init(&m_lock, 0);
 
-  /* NOTE:
-   * This is no more valid if you initialize more than one empower_agent!!!
-   *
-   * The callback systems will be redirected always on the least initialized
-   * agent, this way. The problem does not arise for the moment since the eNB
-   * just need one agent, and no more than one (for now).
-   *
-   * A proper connection between c callback system and C++ class must be put
-   * in place, like for example:
-   *
-   * 	b_id --> class pointer to use
-   */
-  em_agent = this;
+  pthread_mutex_lock(&em_agent_lock);
+  // TODO: Consider raising error or exception if 'em_agent' has a value?
+  if(!em_agent) {
+    em_agent = this;
+  }
+  pthread_mutex_unlock(&em_agent_lock);
 
   /* Create a new thread; we don't use the given thread library since we don't
    * want RT capabilities for this thread, which will run with low priority.
@@ -345,110 +911,210 @@ int empower_agent::init(
   return 0;
 }
 
+/* Routine:
+ *    empower_agent::release
+ * 
+ * Abstract:
+ *    Releases resources that have been initialized during agent startup.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::release()
 {
-  Info("Agent released\n");
+  /* Nothing right now; since all the resources are mainly used in the thread
+   * context of the agent, the thread itself is in charge of releasing all at
+   * termination.
+   */
 }
 
+/* Routine:
+ *    empower_agent::reset
+ * 
+ * Abstract:
+ *    Resets the state machines and variables of the agent. This operation 
+ *    happens usually after a disconnection event, to align the agent to a known
+ *    state.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    0 on success, otherwise a negative error code.
+ */
 int empower_agent::reset()
 {
   int      i;
   uint16_t rnti;
+  em_ue *  ue;
+
+  std::map<uint16_t, em_ue *>::iterator it;
 
   Debug("Resetting the state of the Agent\n");
+  Lock(&m_lock);
 
-  /* Reset any UE report */
+  // Reset any UE report
   m_uer_mod  = 0;
   m_uer_tr   = 0;
   m_uer_feat = 0;
-
-  pthread_spin_lock(&m_lock);
-
-  /* Reset any MAC report */
+  
+  // Reset any MAC report
   for(i = 0; i < EMPOWER_AGENT_MAX_MACREP; i++) {
     m_macrep[i].trigger_id = 0;
   }
 
-  /* Reset any UE RRC state */
-  for(rnti = 0; rnti < 0xffff; rnti++) {
-    if(m_ues.count(rnti) > 0) {
-      /* Invalidate the measure */
-      for(i = 0; i < EMPOWER_AGENT_MAX_MEAS; i++) {
-        m_ues[rnti]->m_meas[i].id      = 0;
-        m_ues[rnti]->m_meas[i].mod_id  = 0;
-        m_ues[rnti]->m_meas[i].trig_id = 0;
-      }
+  // Reset any UE RRC state
+  //for(rnti = 0; rnti < 0xffff; rnti++) {
+  for(it = m_ues.begin(); it != m_ues.end(); ++it) {
+    ue = it->second;
 
-      m_ues[rnti]->m_next_meas_id = 1;
-      m_ues[rnti]->m_next_obj_id  = 1;
-      m_ues[rnti]->m_next_rep_id  = 1;
+    ue->m_id_dirty          = 1;
+    ue->m_state_dirty       = 1;
+
+    // Invalidate the measure
+    for(i = 0; i < EMPOWER_AGENT_MAX_MEAS; i++) {
+      ue->m_meas[i].id      = 0;
+      ue->m_meas[i].mod_id  = 0;
+      ue->m_meas[i].trig_id = 0;
+
+      /* TODO:
+        * What about the measurements that are ongoing in the cell phone? They
+        * are not resetted now, so they will keep going. We can still intercept
+        * them probably in the 'report_RRC_measure' call.
+        * 
+        * We should probably send an empty RRC reconfiguration to reset 
+        * everything, but need to check the specs about that.
+        */
     }
-  }
 
-  pthread_spin_unlock(&m_lock);
+    ue->m_next_meas_id = 1;
+    ue->m_next_obj_id  = 1;
+    ue->m_next_rep_id  = 1;
+  }
+  Unlock(&m_lock);
+
   return 0;
 }
 
+/* Routine:
+ *    empower_agent::setup_UE_report
+ * 
+ * Abstract:
+ *    Setup the agent to handle UE reporting
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - mod_id, module ID to report to
+ *    - trig_id, trigger id assigned to this operation
+ * 
+ * Returns:
+ *    0 on success, otherwise a negative error code.
+ */
 int empower_agent::setup_UE_report(uint32_t mod_id, int trig_id)
 {
   m_uer_mod  = mod_id;
   m_uer_tr   = trig_id;
   m_uer_feat = 1;
+  m_ues_dirty= 1;
 
   Debug("UE report ready; reporting to module %d\n", mod_id);
 
   return 0;
 }
 
+/* Routine:
+ *    empower_agent::setup_MAC_report
+ * 
+ * Abstract:
+ *    Setup the agent to handle MAC reporting
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - mod_id, module ID to report to
+ *    - interval, interval in ms between the reports
+ *    - trig_id, trigger id assigned to this operation
+ * 
+ * Returns:
+ *    0 on success, otherwise a negative error code.
+ */
 int empower_agent::setup_MAC_report(
   uint32_t mod_id, uint32_t interval, int trig_id)
 {
   int         i;
-  int         m = -1;
   char        buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
   int         blen;
 
-  for(i = 0; i < EMPOWER_AGENT_MAX_MACREP; i++) {
-    if(!m_macrep[i].trigger_id) {
-      m = i;
-    }
+  Lock(&m_lock);
 
-    /* Measure is already there... */
-    if(m_macrep[i].mod_id == mod_id) {
-      m_macrep[i].interval = interval;
-      return 0;
+  for(i = 0; i < EMPOWER_AGENT_MAX_MACREP; i++) {
+    // Slot is 'reserved' if the trigger ID is different than 0
+    if(!m_macrep[i].trigger_id) {
+      // Reserve this slot!
+      m_macrep[i].trigger_id = trig_id;
     }
   }
 
-  if(m < 0) {
-    blen = epf_trigger_macrep_rep_fail(
-      buf,
-      EMPOWER_AGENT_BUF_SMALL_SIZE,
-      em_agent->get_id(),
-      0,
-      mod_id);
+  Unlock(&m_lock);
 
-    if(blen > 0) {
-      em_send(em_agent->get_id(), buf, blen);
-    }
-
-    Debug("New MAC report from module %d ready\n", mod_id);
-
+  if(i == EMPOWER_AGENT_MAX_MACREP) {
+    /* !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     * TODO:
+     * Due the inability of the controller to handle errors, error reporting
+     * here is suppressed. This NEEDS to be changed, but we need controller
+     * support first!
+     * !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+     */
     return 0;
   }
 
-  /* Setup the MAC report request here: */
+  // Setup the MAC report request here
 
-  m_macrep[m].mod_id     = mod_id;
-  m_macrep[m].interval   = interval;
-  m_macrep[m].trigger_id = trig_id;
-  m_macrep[m].DL_acc     = 0;
-  m_macrep[m].UL_acc     = 0;
-  clock_gettime(CLOCK_REALTIME, &m_macrep[m].last);
+  m_macrep[i].mod_id   = mod_id;
+  m_macrep[i].interval = interval;
+  m_macrep[i].DL_acc   = 0;
+  m_macrep[i].UL_acc   = 0;
+  clock_gettime(CLOCK_REALTIME, &m_macrep[i].last);
+
+  Debug("New MAC report from module %d ready\n", mod_id);
 
   return 0;
 }
 
+/* Routine:
+ *    empower_agent::setup_UE_period_meas
+ * 
+ * Abstract:
+ *    Setup the agent to handle UE measurement reporting
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - mod, Module ID which requested the report
+ *    - trig_id, ID of the assigned trigger
+ *    - measure_id, ID of the measurement
+ *    - rnti, target UE which should perform the measurements
+ *    - earfcn, frequency where to operate the measurement
+ *    - interval, interval of the measurement in ms
+ *    - max_cells, maximum amount of cell to consider
+ *    - max_meas, maximum amount of measurements to send back
+ * 
+ * Returns:
+ *    0 on success, otherwise a negative error code.
+ */
 int empower_agent::setup_UE_period_meas(
   uint32_t id,
   int      trigger_id,
@@ -459,12 +1125,17 @@ int empower_agent::setup_UE_period_meas(
   uint16_t max_meas,
   int      interval)
 {
-  int i;
-  int j;
-  int n = 0;
+  int i;    // Index
+  int j;    // Index
+  int n = 0;// Index
 
-  LIBLTE_RRC_MEAS_CONFIG_STRUCT   meas;
-  LIBLTE_RRC_REPORT_INTERVAL_ENUM rep_int;
+  int bw;   // Bandwidth
+
+  LIBLTE_RRC_MEAS_CONFIG_STRUCT                meas;
+  LIBLTE_RRC_REPORT_INTERVAL_ENUM              rep_int;
+  LIBLTE_RRC_MEAS_OBJECT_TO_ADD_MOD_STRUCT *   mobj;
+  LIBLTE_RRC_REPORT_CONFIG_TO_ADD_MOD_STRUCT * mrep;
+  LIBLTE_RRC_MEAS_ID_TO_ADD_MOD_STRUCT *       mid;
 
   all_args_t * args = (all_args_t *)m_args;
 
@@ -476,11 +1147,47 @@ int empower_agent::setup_UE_period_meas(
     return -1;
   }
 
+  /* NOTES: The 'bw' indicates the maximum allowed measurement bandwidth to 
+   * detect. Having a too permessive scan can consume lot of the UE resources,
+   * but scanning only 'smaller' signals reduce the overall performances with 
+   * time (UE will only see cells with fewer resources).
+   */
+  if(args->enb.n_prb) {
+    bw = LIBLTE_RRC_ALLOWED_MEAS_BANDWIDTH_MBW100;
+  } else {
+    switch(args->enb.n_prb) {
+    case 75:
+      bw = LIBLTE_RRC_ALLOWED_MEAS_BANDWIDTH_MBW75;
+      break;
+    case 50:
+      bw = LIBLTE_RRC_ALLOWED_MEAS_BANDWIDTH_MBW50;
+      break;
+    case 25:
+      bw = LIBLTE_RRC_ALLOWED_MEAS_BANDWIDTH_MBW25;
+      break;
+    case 15:
+      bw = LIBLTE_RRC_ALLOWED_MEAS_BANDWIDTH_MBW15;
+      break;
+    default:
+      bw = LIBLTE_RRC_ALLOWED_MEAS_BANDWIDTH_MBW6;
+      break;
+    }
+
+    /* This gives the opportunity to the controller to locate cells with larger
+     * BW and order a handover to them, promoting the UE on a larger cell.
+     */
+    bw++;
+  }
+
+  Lock(&m_lock);
+
   for(i = 0; i < EMPOWER_AGENT_MAX_MEAS; i++) {
     if(m_ues[rnti]->m_meas[i].mod_id == 0) {
       break;
     }
   }
+
+  Unlock(&m_lock);
 
   if(i == EMPOWER_AGENT_MAX_MEAS) {
     return -1;
@@ -495,45 +1202,72 @@ int empower_agent::setup_UE_period_meas(
   m_ues[rnti]->m_meas[i].carrier.pci = (uint16_t)args->enb.pci;
 
   m_ues[rnti]->m_meas[i].max_cells   =
-    max_cells > EMPOWER_AGENT_MAX_CELL_MEAS ? EMPOWER_AGENT_MAX_CELL_MEAS : max_cells;
+    max_cells > EMPOWER_AGENT_MAX_CELL_MEAS ? 
+      EMPOWER_AGENT_MAX_CELL_MEAS : 
+      max_cells;
+
   m_ues[rnti]->m_meas[i].max_meas    =
-    max_meas > EMPOWER_AGENT_MAX_MEAS ? EMPOWER_AGENT_MAX_MEAS : max_meas;
+    max_meas > EMPOWER_AGENT_MAX_MEAS ? 
+      EMPOWER_AGENT_MAX_MEAS : 
+      max_meas;
 
   m_ues[rnti]->m_meas[i].meas_id     = m_ues[rnti]->m_next_meas_id++;
   m_ues[rnti]->m_meas[i].obj_id      = m_ues[rnti]->m_next_obj_id++;
   m_ues[rnti]->m_meas[i].rep_id      = m_ues[rnti]->m_next_rep_id++;
 
-  Debug("Setting up RRC measurement %d-->%d for RNTI %x\n", m_ues[rnti]->m_meas[i].id, m_ues[rnti]->m_meas[i].meas_id, rnti);
+  Debug("Setting up RRC measurement %d-->%d for RNTI %x\n",
+    m_ues[rnti]->m_meas[i].id, m_ues[rnti]->m_meas[i].meas_id, rnti);
 
   /*
    * Prepare RRC request to send to the UE.
-   */
-
-  /* NOTE: This has probably to be setup every time we request a measure to the
+   * 
+   * NOTE: This has probably to be setup every time we request a measure to the
    * UE, with the list of measurements to do. Probably old measurements are
    * discarded and only the last one maintained... need to test...
    */
 
   bzero(&meas, sizeof(LIBLTE_RRC_MEAS_CONFIG_STRUCT));
 
+  /* Prepare the RRC configuration message with all the measurements that has
+   * been set up.
+   */ 
   for(j = 0; j < EMPOWER_AGENT_MAX_MEAS; j++) {
+    // Skip if the measurement slot is not valid
     if(m_ues[rnti]->m_meas[j].mod_id == 0) {
       continue;
     }
 
     if(m_ues[rnti]->m_meas[j].interval <= 120) {
       rep_int = LIBLTE_RRC_REPORT_INTERVAL_MS120;
-    } else if(m_ues[rnti]->m_meas[j].interval > 120 && m_ues[rnti]->m_meas[j].interval <= 240) {
+    } else if(
+      m_ues[rnti]->m_meas[j].interval > 120 && 
+      m_ues[rnti]->m_meas[j].interval <= 240) 
+    {
       rep_int = LIBLTE_RRC_REPORT_INTERVAL_MS240;
-    } else if(m_ues[rnti]->m_meas[j].interval > 240 && m_ues[rnti]->m_meas[j].interval <= 480) {
+    } else if(
+      m_ues[rnti]->m_meas[j].interval > 240 && 
+      m_ues[rnti]->m_meas[j].interval <= 480) 
+    {
       rep_int = LIBLTE_RRC_REPORT_INTERVAL_MS480;
-    } else if(m_ues[rnti]->m_meas[j].interval > 480 && m_ues[rnti]->m_meas[j].interval <= 640) {
+    } else if(
+      m_ues[rnti]->m_meas[j].interval > 480 && 
+      m_ues[rnti]->m_meas[j].interval <= 640) 
+    {
       rep_int = LIBLTE_RRC_REPORT_INTERVAL_MS640;
-    } else if(m_ues[rnti]->m_meas[j].interval > 640 && m_ues[rnti]->m_meas[j].interval <= 1024) {
+    } else if(
+      m_ues[rnti]->m_meas[j].interval > 640 && 
+      m_ues[rnti]->m_meas[j].interval <= 1024) 
+    {
       rep_int = LIBLTE_RRC_REPORT_INTERVAL_MS1024;
-    } else if(m_ues[rnti]->m_meas[j].interval > 1024 && m_ues[rnti]->m_meas[j].interval <= 2048) {
+    } else if(
+      m_ues[rnti]->m_meas[j].interval > 1024 && 
+      m_ues[rnti]->m_meas[j].interval <= 2048) 
+    {
       rep_int = LIBLTE_RRC_REPORT_INTERVAL_MS2048;
-    } else if(m_ues[rnti]->m_meas[j].interval > 2048 && m_ues[rnti]->m_meas[j].interval <= 5120) {
+    } else if(
+      m_ues[rnti]->m_meas[j].interval > 2048 && 
+      m_ues[rnti]->m_meas[j].interval <= 5120) 
+    {
       rep_int = LIBLTE_RRC_REPORT_INTERVAL_MS5120;
     } else {
       rep_int = LIBLTE_RRC_REPORT_INTERVAL_MS10240;
@@ -551,67 +1285,126 @@ int empower_agent::setup_UE_period_meas(
     meas.N_meas_obj_to_remove             = 0;
     meas.N_rep_cnfg_to_remove             = 0;
 
-    // Measurement object:
+    // Prepare the measurement Object
 
-    meas.meas_obj_to_add_mod_list.N_meas_obj++;
-    n = meas.meas_obj_to_add_mod_list.N_meas_obj - 1;
+    mobj = meas.meas_obj_to_add_mod_list.meas_obj_list + n;
 
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_id                                       = m_ues[rnti]->m_meas[j].obj_id;
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_type                                     = LIBLTE_RRC_MEAS_OBJECT_TYPE_EUTRA;
+    mobj->meas_obj_id   = m_ues[rnti]->m_meas[j].obj_id;
+    mobj->meas_obj_type = LIBLTE_RRC_MEAS_OBJECT_TYPE_EUTRA;
 
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.offset_freq_not_default            = false;
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.presence_ant_port_1                = true;
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.cells_to_remove_list_present       = false;
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.black_cells_to_remove_list_present = false;
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.cell_for_which_to_rep_cgi_present  = false;
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.N_black_cells_to_add_mod           = 0;
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.N_cells_to_add_mod                 = 0;
+    mobj->meas_obj_eutra.offset_freq_not_default            = false;
+    mobj->meas_obj_eutra.presence_ant_port_1                = true;
+    mobj->meas_obj_eutra.cells_to_remove_list_present       = false;
+    mobj->meas_obj_eutra.black_cells_to_remove_list_present = false;
+    mobj->meas_obj_eutra.cell_for_which_to_rep_cgi_present  = false;
+    mobj->meas_obj_eutra.N_black_cells_to_add_mod           = 0;
+    mobj->meas_obj_eutra.N_cells_to_add_mod                 = 0;
 
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.allowed_meas_bw                    = LIBLTE_RRC_ALLOWED_MEAS_BANDWIDTH_MBW25;
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.offset_freq                        = LIBLTE_RRC_Q_OFFSET_RANGE_DB_0;
-    meas.meas_obj_to_add_mod_list.meas_obj_list[n].meas_obj_eutra.carrier_freq                       = m_ues[rnti]->m_meas[j].freq;
+    // NOTE: This indicates the maximum allowed measurement bandwidth
+    mobj->meas_obj_eutra.allowed_meas_bw = 
+      (LIBLTE_RRC_ALLOWED_MEAS_BANDWIDTH_ENUM)bw;
+    mobj->meas_obj_eutra.offset_freq     = 
+      LIBLTE_RRC_Q_OFFSET_RANGE_DB_0;
+    mobj->meas_obj_eutra.carrier_freq    = m_ues[rnti]->m_meas[j].freq;
 
-    // Measurement report:
+    meas.meas_obj_to_add_mod_list.N_meas_obj++; // One more object
 
-    meas.rep_cnfg_to_add_mod_list.N_rep_cnfg++;
-    n = meas.rep_cnfg_to_add_mod_list.N_rep_cnfg - 1;
+    // Prepare the measurement Report
 
-    meas.rep_cnfg_to_add_mod_list.rep_cnfg_list[n].rep_cnfg_id                                       = m_ues[rnti]->m_meas[j].rep_id;
-    meas.rep_cnfg_to_add_mod_list.rep_cnfg_list[n].rep_cnfg_type                                     = LIBLTE_RRC_REPORT_CONFIG_TYPE_EUTRA;
+    mrep = meas.rep_cnfg_to_add_mod_list.rep_cnfg_list + n;
 
-    meas.rep_cnfg_to_add_mod_list.rep_cnfg_list[n].rep_cnfg_eutra.trigger_type                       = LIBLTE_RRC_TRIGGER_TYPE_EUTRA_PERIODICAL;
-    meas.rep_cnfg_to_add_mod_list.rep_cnfg_list[n].rep_cnfg_eutra.trigger_quantity                   = LIBLTE_RRC_TRIGGER_QUANTITY_RSRQ;
-    meas.rep_cnfg_to_add_mod_list.rep_cnfg_list[n].rep_cnfg_eutra.periodical.purpose                 = LIBLTE_RRC_PURPOSE_EUTRA_REPORT_STRONGEST_CELL;
-    meas.rep_cnfg_to_add_mod_list.rep_cnfg_list[n].rep_cnfg_eutra.report_amount                      = LIBLTE_RRC_REPORT_AMOUNT_INFINITY;
-    meas.rep_cnfg_to_add_mod_list.rep_cnfg_list[n].rep_cnfg_eutra.report_quantity                    = LIBLTE_RRC_REPORT_QUANTITY_BOTH;
-    meas.rep_cnfg_to_add_mod_list.rep_cnfg_list[n].rep_cnfg_eutra.report_interval                    = rep_int;
-    meas.rep_cnfg_to_add_mod_list.rep_cnfg_list[n].rep_cnfg_eutra.max_report_cells                   = m_ues[rnti]->m_meas[j].max_cells;
+    mrep->rep_cnfg_id   = m_ues[rnti]->m_meas[j].rep_id;
+    mrep->rep_cnfg_type = LIBLTE_RRC_REPORT_CONFIG_TYPE_EUTRA;
+
+    mrep->rep_cnfg_eutra.trigger_type     = 
+      LIBLTE_RRC_TRIGGER_TYPE_EUTRA_PERIODICAL;
+    mrep->rep_cnfg_eutra.trigger_quantity = 
+      LIBLTE_RRC_TRIGGER_QUANTITY_RSRQ;
+    mrep->rep_cnfg_eutra.periodical.purpose = 
+      LIBLTE_RRC_PURPOSE_EUTRA_REPORT_STRONGEST_CELL;
+    mrep->rep_cnfg_eutra.report_amount    = 
+      LIBLTE_RRC_REPORT_AMOUNT_INFINITY;
+    mrep->rep_cnfg_eutra.report_quantity  = 
+      LIBLTE_RRC_REPORT_QUANTITY_BOTH;
+    mrep->rep_cnfg_eutra.report_interval  = rep_int;
+    mrep->rep_cnfg_eutra.max_report_cells = m_ues[rnti]->m_meas[j].max_cells;
+
+    meas.rep_cnfg_to_add_mod_list.N_rep_cnfg++; // One more report
 
     // Measurement IDs:
 
-    meas.meas_id_to_add_mod_list.N_meas_id                                                           = n + 1;
-    meas.meas_id_to_add_mod_list.meas_id_list[n].meas_id                                             = m_ues[rnti]->m_meas[j].meas_id;
-    meas.meas_id_to_add_mod_list.meas_id_list[n].meas_obj_id                                         = m_ues[rnti]->m_meas[j].obj_id;
-    meas.meas_id_to_add_mod_list.meas_id_list[n].rep_cnfg_id                                         = m_ues[rnti]->m_meas[j].rep_id;
+    mid = meas.meas_id_to_add_mod_list.meas_id_list + n;
+
+    mid->meas_id     = m_ues[rnti]->m_meas[j].meas_id;
+    mid->meas_obj_id = m_ues[rnti]->m_meas[j].obj_id;
+    mid->rep_cnfg_id = m_ues[rnti]->m_meas[j].rep_id;
+    
+    meas.meas_id_to_add_mod_list.N_meas_id++; // One more ID
+
+    n++; // Increment the index to access RRc meas. structures
   }
 
-  Debug("Sending to %x a new RRC reconfiguration for %d measurement(s)\n", rnti, n + 1);
+  Debug("Sending to %x a new RRC reconfiguration for %d measurement(s)\n",
+    rnti, n);
 
   m_rrc->setup_ue_measurement(rnti, &meas);
 
   return 0;
 }
 
+/* Routine:
+ *    empower_agent::setup_RAN_report
+ * 
+ * Abstract:
+ *    Setup the agent to handle RAN reporting
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - mod_id, module ID to report to
+ * 
+ * Returns:
+ *    0 on success, otherwise a negative error code.
+ */
+int empower_agent::setup_RAN_report(uint32_t mod)
+{
+  m_RAN_feat      = 1;
+  m_RAN_def_dirty = 0;
+  m_RAN_mod       = mod;
+
+  return 0;
+}
+
 /******************************************************************************
- * agent_interface_mac.                                                       *
+ *                                                                            *
+ *                         Agent interface for MAC                            *
+ *                                                                            *
  ******************************************************************************/
 
+/* Routine:
+ *    empower_agent::process_DL_results
+ * 
+ * Abstract:
+ *    MAC layer has scheduled the Downwlink and is reporting the result to us.
+ *    This procedure is quick and lightweight, or otherwise can impact on the
+ *    scheduler performances.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - tti, Transmission Time Interval
+ *    - sced_results, the results
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::process_DL_results(
   uint32_t tti, sched_interface::dl_sched_res_t * sched_result)
 {
-  uint32_t i;
-  int      prbs = 0;
-
+  uint32_t     i;
+  int          prbs = 0;
   all_args_t * args = (all_args_t *)m_args;
 
   for(i = 0; i < sched_result->nof_bc_elems; i++) {
@@ -626,53 +1419,106 @@ void empower_agent::process_DL_results(
     prbs += prbs_from_dci(&sched_result->data[i].dci, 1, args->enb.n_prb);
   }
 
+  Lock(&m_lock);
   m_DL_prbs_used += prbs;
   m_DL_sf++;
+  Unlock(&m_lock);
 }
 
+/* Routine:
+ *    empower_agent::process_UL_results
+ * 
+ * Abstract:
+ *    MAC layer has scheduled the Uplink and is reporting the result to us.
+ *    This procedure is quick and lightweight, or otherwise can impact on the
+ *    scheduler performances.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - tti, Transmission Time Interval
+ *    - sced_results, the results
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::process_UL_results(
   uint32_t tti, sched_interface::ul_sched_res_t * sched_result)
 {
-  uint32_t i;
-  int      prbs = 0;
-
+  uint32_t     i;
+  int          prbs = 0;
   all_args_t * args = (all_args_t *)m_args;
 
   for(i = 0; i < sched_result->nof_dci_elems; i++) {
     prbs += prbs_from_dci(&sched_result->pusch[i].dci, 0, args->enb.n_prb);
   }
 
+  Lock(&m_lock);
   m_UL_prbs_used += prbs;
   m_UL_sf++;
+  Unlock(&m_lock);
 }
 
 /******************************************************************************
- * agent_interface_rrc.                                                       *
+ *                                                                            *
+ *                         Agent interface for RRC                            *
+ *                                                                            *
  ******************************************************************************/
 
+/* Routine:
+ *    empower_agent::add_user
+ * 
+ * Abstract:
+ *    RRC layer reporting that Radio Resources for a new user have been
+ *    allocated, and thus we have to consider it too. This operations should be
+ *    performed in a quick way, since the execution context is the PRACH one.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - rnti, ID of the user to add
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::add_user(uint16_t rnti)
 {
   std::map<uint16_t, em_ue *>::iterator it;
-
   all_args_t * args = (all_args_t *)m_args;
 
-  pthread_spin_lock(&m_lock);
+  Lock(&m_lock);
 
   it = m_ues.find(rnti);
 
   if(it == m_ues.end()) {
-     m_ues.insert(std::make_pair(rnti, new em_ue()));
+    m_ues.insert(std::make_pair(rnti, new em_ue()));
     m_nof_ues++;
 
     m_ues[rnti]->m_plmn  = (args->enb.s1ap.mcc & 0x0fff) << 12;
     m_ues[rnti]->m_plmn |= (args->enb.s1ap.mnc & 0x0fff);
+    m_ues[rnti]->m_imsi  = 0;
+    m_ues[rnti]->m_tmsi  = 0;
+    m_ues[rnti]->m_id_dirty = 1; // Mark as to send
+
+    m_ues[rnti]->m_state = UE_STATUS_RADIO_CONNECTED;
+    m_ues[rnti]->m_state_dirty  = 1; // Mark as to send
 
     m_ues[rnti]->m_next_meas_id = 1;
     m_ues[rnti]->m_next_obj_id  = 1;
     m_ues[rnti]->m_next_rep_id  = 1;
 
-    /* Clean up measurements*/
-    memset(m_ues[rnti]->m_meas, 0, sizeof(em_ue::ue_meas) * EMPOWER_AGENT_MAX_MEAS);
+    /* Clean up measurements */
+    memset(
+      m_ues[rnti]->m_meas, 
+      0, 
+      sizeof(em_ue::ue_meas) * EMPOWER_AGENT_MAX_MEAS);
+
+#ifdef HAVE_RAN_SLICER
+    // Creation of user triggers modification at RAN layer for the agent
+    m_RAN_def_dirty = 1;
+#endif
 
     if(m_uer_feat) {
       m_ues_dirty = 1;
@@ -681,36 +1527,131 @@ void empower_agent::add_user(uint16_t rnti)
     Debug("Added user %x (PLMN:%x)\n", rnti, m_ues[rnti]->m_plmn);
   }
 
-  pthread_spin_unlock(&m_lock);
+  Unlock(&m_lock);
 }
 
+/* Routine:
+ *    empower_agent::rem_user
+ * 
+ * Abstract:
+ *    RRC layer reporting that Radio Resources for an user will be removed from
+ *    the eNB stack. 
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - rnti, ID of the user to remove
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::rem_user(uint16_t rnti)
 {
   em_ue * ue;
   std::map<uint16_t, em_ue *>::iterator it;
 
-  pthread_spin_lock(&m_lock);
+  Lock(&m_lock);
 
   it = m_ues.find(rnti);
 
   if(it != m_ues.end()) {
     Debug("Removing user %x\n", rnti);
 
-    ue = it->second;
-
-    m_nof_ues--;
-    m_ues.erase(it);
+    //ue = it->second;
+    //m_nof_ues--;
+    //m_ues.erase(it);
+    m_ues[rnti]->m_state       = UE_STATUS_RADIO_DISCONNECTED;
+    m_ues[rnti]->m_state_dirty = 1; // Mark as to update
 
     if(m_uer_feat) {
       m_ues_dirty = 1;
     }
 
-    delete it->second;
+    //delete it->second;
+
+#ifdef HAVE_RAN_SLICER
+    m_RAN_def_dirty = 1;
+#endif
   }
 
-  pthread_spin_unlock(&m_lock);
+  Unlock(&m_lock);
 }
 
+/* Routine:
+ *    empower_agent::update_user_ID
+ * 
+ * Abstract:
+ *    RRC layer report an update in the UE identity through additional checks
+ *    performed during message exchange with the Core Network.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - rnti, ID of the user to update
+ *    - plmn, PLMN ID of the user
+ *    - imsi, Subscriber identity of the user
+ *    - tmsi, Temporary identity of the user
+ * 
+ * Returns:
+ *    ---
+ */
+void empower_agent::update_user_ID(
+    uint16_t rnti, uint32_t plmn, uint64_t imsi, uint32_t tmsi) 
+{
+  em_ue * ue;
+  std::map<uint16_t, em_ue *>::iterator it;
+
+  Lock(&m_lock);
+
+  it = m_ues.find(rnti);
+
+  if(it != m_ues.end()) {
+    Debug("Updating user %x identity\n", rnti);
+
+    if(plmn) {
+      m_ues[rnti]->m_plmn = plmn;
+    }
+    
+    if(imsi) {
+      m_ues[rnti]->m_imsi = imsi;
+    }
+    
+    if(tmsi) {
+      m_ues[rnti]->m_tmsi = tmsi;
+    }
+    
+    m_ues[rnti]->m_id_dirty = 1; // Mark as identity to update
+
+    if(m_uer_feat) {
+      m_ues_dirty = 1;
+    }
+
+#ifdef HAVE_RAN_SLICER
+    m_RAN_def_dirty = 1;
+#endif
+  }
+
+  Unlock(&m_lock);
+}
+
+/* Routine:
+ *    empower_agent::report_RRC_measure
+ * 
+ * Abstract:
+ *    RRC layer reporting that a measurement has been collected from an UE.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - rnti, ID of the UE reporting
+ *    - report, information about UE measurements reported
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::report_RRC_measure(
   uint16_t rnti, LIBLTE_RRC_MEASUREMENT_REPORT_STRUCT * report)
 {
@@ -721,8 +1662,9 @@ void empower_agent::report_RRC_measure(
   LIBLTE_RRC_MEAS_RESULT_EUTRA_STRUCT * cells;
 
   if (report->have_meas_result_neigh_cells && 
-    report->meas_result_neigh_cells_choice == LIBLTE_RRC_MEAS_RESULT_LIST_EUTRA) {
-
+    report->meas_result_neigh_cells_choice == 
+      LIBLTE_RRC_MEAS_RESULT_LIST_EUTRA)
+  {
     nof_cells = report->meas_result_neigh_cells.eutra.n_result;
   }
 
@@ -732,14 +1674,17 @@ void empower_agent::report_RRC_measure(
     }
   }
 
-  /* NOTE: Should we try to revoke the measure if is not managed? */
+  // NOTE: Should we try to revoke the measure if is not managed?
   if(i == EMPOWER_AGENT_MAX_MEAS) {
-    Error("Measure %d of RNTI %x not found! Index=%d\n", report->meas_id, rnti, i);
+    Error("Measure %d of RNTI %x not found! Index=%d\n",
+      report->meas_id, rnti, i);
+
     return;
   }
 
   if(m_ues.count(rnti) != 0) {
-    Debug("Saving received RRC measure %d from user %x\n", m_ues[rnti]->m_meas[i].id, rnti);
+    Debug("Received RRC measure %d from user %x\n",
+      m_ues[rnti]->m_meas[i].id, rnti);
 
     m_ues[rnti]->m_meas[i].carrier.rsrp = report->pcell_rsrp_result;
     m_ues[rnti]->m_meas[i].carrier.rsrq = report->pcell_rsrq_result;
@@ -761,9 +1706,27 @@ void empower_agent::report_RRC_measure(
 }
 
 /******************************************************************************
- * Interaction with controller.                                               *
+ *                                                                            *
+ *                    Agent interaction with controller                       *
+ *                                                                            *
  ******************************************************************************/
 
+/* Routine:
+ *    empower_agent::send_MAC_report
+ * 
+ * Abstract:
+ *    Send a MAC report message to the controller.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - mod_id, ID of the target module
+ *    - det, MAC info to send
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::send_MAC_report(uint32_t mod_id, ep_macrep_det * det)
 {
   int i;
@@ -781,7 +1744,7 @@ void empower_agent::send_MAC_report(uint32_t mod_id, ep_macrep_det * det)
     det);
 
   if(size <= 0) {
-    Error("Cannot format MAC report reply\n");
+    Error("Cannot format MAC report reply, error %d\n", size);
     return;
   }
 
@@ -790,28 +1753,79 @@ void empower_agent::send_MAC_report(uint32_t mod_id, ep_macrep_det * det)
   em_send(m_id, buf, size);
 }
 
+/* Routine:
+ *    empower_agent::send_UE_report
+ * 
+ * Abstract:
+ *    Send an UE report message to the controller.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::send_UE_report(void)
 {
   std::map<uint16_t, em_ue *>::iterator it;
-
-  int           i;
+  
+  em_ue *       ue;
+  int           i       = 0;
+  int           r; /* will be reported? */
   char          buf[EMPOWER_AGENT_BUF_SMALL_SIZE];
   int           size;
   ep_ue_details ued[16];
 
   all_args_t * args = (all_args_t *)m_args;
 
-  pthread_spin_lock(&m_lock);
+  memset(ued, 0, sizeof(ep_ue_details));
 
-  for(i = 0, it = m_ues.begin(); it != m_ues.end(); ++it, i++)
-  {
-    ued[i].pci  = (uint16_t)args->enb.pci;
-    ued[i].rnti = it->first;
-    ued[i].plmn = it->second->m_plmn;
-    ued[i].imsi = it->second->m_imsi;
+  Lock(&m_lock);
+
+  for(it = m_ues.begin(); i < 16 && it !=  m_ues.end(); /* Nothing */) {
+    ue = it->second;
+    r  = 0;
+
+    // State first; if the UE disconnects the identity is not interesting
+    if(ue->m_state_dirty) {
+      ued[i].rnti = it->first;
+      ued[i].state= ue->m_state;
+
+      ue->m_state_dirty = 0;
+      r = 1;
+      // We are reporting the UE going offline
+      if(ue->m_state == UE_STATUS_RADIO_DISCONNECTED) {
+        m_ues.erase(it++); // Increment iterator
+        m_nof_ues--;
+
+        delete ue;// Remove allocated UE descriptor
+
+        i++;      // Next reporting slot
+        continue; // Next UE to report
+      }
+    }
+
+    if(ue->m_id_dirty) {
+      ued[i].rnti = it->first;
+      ued[i].plmn = ue->m_plmn;
+      ued[i].imsi = ue->m_imsi;
+      ued[i].tmsi = ue->m_tmsi;
+
+      ue->m_id_dirty = 0;
+      r = 1;
+    }
+
+    if(r) {
+      i++;// Next reporting slot
+    }
+
+    ++it; // Increment iterator
   }
 
-  pthread_spin_unlock(&m_lock);
+  Unlock(&m_lock);
 
   size = epf_trigger_uerep_rep(
     buf,
@@ -831,10 +1845,25 @@ void empower_agent::send_UE_report(void)
   em_send(m_id, buf, size);
 }
 
+/* Routine:
+ *    empower_agent::send_UE_meas
+ * 
+ * Abstract:
+ *    Send an UE measurement report message to the controller.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - m, measurements to send
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::send_UE_meas(em_ue::ue_meas * m)
 {
   int           i;
-  int           j; /* j + 1 will be the amount of measurements to send */
+  int           j;
   char          buf[EMPOWER_AGENT_BUF_SMALL_SIZE];
   int           size;
 
@@ -877,11 +1906,27 @@ void empower_agent::send_UE_meas(em_ue::ue_meas * m)
   em_send(m_id, buf, size);
 }
 
-
 /******************************************************************************
- * Private utilities.                                                         *
+ *                                                                            *
+ *                            Generic utilities                               *
+ *                                                                            *
  ******************************************************************************/
 
+/* Routine:
+ *    empower_agent::dirty_ue_check
+ * 
+ * Abstract:
+ *    Check if UEs status changed, and if it's needed to report it.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::dirty_ue_check()
 {
   Debug("Checking for changes in the UE status\n");
@@ -900,6 +1945,21 @@ void empower_agent::dirty_ue_check()
   }
 }
 
+/* Routine:
+ *    empower_agent::measure_check
+ * 
+ * Abstract:
+ *    Check if UEs measurement status changed, and if it's needed to report it.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::measure_check()
 {
   int i;
@@ -933,6 +1993,21 @@ void empower_agent::measure_check()
   }
 }
 
+/* Routine:
+ *    empower_agent::macrep_check
+ * 
+ * Abstract:
+ *    Check if MAC status changed, and if it's needed to report it.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::macrep_check()
 {
   int             i;
@@ -958,7 +2033,7 @@ void empower_agent::macrep_check()
     clock_gettime(CLOCK_REALTIME, &now);
 
     /* Interval given elapsed? */
-    if(ts_diff_to_ms(m_macrep[i].last, now) >= m_macrep[i].interval) {
+    if(time_diff(m_macrep[i].last, now) >= m_macrep[i].interval) {
       mac.DL_prbs_total        = (uint8_t)args->enb.n_prb;
       mac.DL_prbs_used         = m_DL_prbs_used;
 
@@ -979,7 +2054,89 @@ void empower_agent::macrep_check()
   }
 }
 
-/* Extracts the PRBS used from a certain DCI */
+/* Routine:
+ *    empower_agent::ran_check
+ * 
+ * Abstract:
+ *    Check if RAN status changed, and if it's needed to report it.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
+void empower_agent::ran_check()
+{
+  ran_interface_common::slice_args slice_inf;
+
+  char             buf[EMPOWER_AGENT_BUF_SMALL_SIZE] = {0};
+  int              blen;
+  ep_ran_slice_det det;
+  all_args_t *     args = (all_args_t *)m_args;
+
+  memset(&det, 0, sizeof(ep_ran_slice_det));
+
+//  Lock(&m_lock);
+  if(!m_RAN_def_dirty) {
+ //   Unlock(&m_lock);
+    return;
+  }
+//  Unlock(&m_lock);
+
+//#ifdef HAVE_RAN_SLICER
+#if 0
+  det.nof_users       = 16;
+  slice_inf.users     = det.users;
+  slice_inf.nof_users = det.nof_users;
+
+  m_ran->get_slice_info(9622457614860288L, &slice_inf);
+  
+  blen = epf_single_ran_slice_rep(
+    buf, 
+    EMPOWER_AGENT_BUF_SMALL_SIZE,
+    em_agent->get_id(),
+    (uint16_t)args->enb.pci,
+    m_RAN_mod,
+    9622457614860288L,
+    &det);
+
+  if(blen > 0) {
+    em_send(em_agent->get_id(), buf, blen);
+  }
+
+#endif
+
+  Lock(&m_lock);
+  m_RAN_def_dirty = 0;
+  Unlock(&m_lock);
+
+  return;
+}
+
+/* Routine:
+ *    empower_agent::prbs_from_dci
+ * 
+ * Abstract:
+ *    Extracts the number of PRBs used from a given PCI; this operation can be
+ *    performed in both DL and UL.
+ * 
+ *    This procedure has been copied from srsLTE library routines.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - dci, The DCI structure to analyse
+ *    - dl, operation on a Downlink DCI?
+ *    - cell_prbs, number of total PRBs of the cell
+ * 
+ * Returns:
+ *    The number of PRBs used by the DCI
+ */
 int empower_agent::prbs_from_dci(void * dci, int dl, uint32_t cell_prbs)
 {
   srslte_ra_dl_dci_t * dld;
@@ -1009,7 +2166,24 @@ int empower_agent::prbs_from_dci(void * dci, int dl, uint32_t cell_prbs)
   return 0;
 }
 
-/* Extracts the PRBS used from a bits-mask or RIV field */
+/* Routine:
+ *    empower_agent::prbs_from_mask
+ * 
+ * Abstract:
+ *    Extracts the number of PRBs used from a certain bitmask.
+ *    This procedure has been copied from srsLTE library routines.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - RA_format, Resource Allocation Format
+ *    - mask, the bitmask to analyse
+ *    - cell_prbs, total resources used by the cell
+ * 
+ * Returns:
+ *    The number of PRBs used by the DCI
+ */
 int empower_agent::prbs_from_mask(
   int RA_format, uint32_t mask, uint32_t cell_prbs)
 {
@@ -1041,9 +2215,27 @@ int empower_agent::prbs_from_mask(
 }
 
 /******************************************************************************
- * Agent threading context.                                                   *
+ *                                                                            *
+ *                         Agent threading context                            *
+ *                                                                            *
  ******************************************************************************/
 
+/* Routine:
+ *    empower_agent::agent_loop
+ * 
+ * Abstract:
+ *    Perform agent operation in a loop. The thread is stopped when the state
+ *    is switched to the right value, and resources are freed at its end.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    - args, the instance of the agent to operate on
+ * 
+ * Returns:
+ *    Null pointer
+ */
 void * empower_agent::agent_loop(void * args)
 {
   all_args_t *    enb_args = enb::get_instance()->get_args();
@@ -1055,8 +2247,8 @@ void * empower_agent::agent_loop(void * args)
     a->m_id,
     &empower_agent_ops,
     (char *)enb_args->enb.ctrl_addr.c_str(),
-    enb_args->enb.ctrl_port)) {
-
+    enb_args->enb.ctrl_port)) 
+  {
     return 0;
   }
 
@@ -1069,10 +2261,14 @@ void * empower_agent::agent_loop(void * args)
       a->dirty_ue_check();
     }
 
+    if(a->m_RAN_feat) {
+      a->ran_check();
+    }
+
     a->measure_check();
     a->macrep_check();
 
-    sleep(1);
+    usleep(100000); // Sleep for 100 ms
   }
 
   em_terminate_agent(a->m_id);
@@ -1080,13 +2276,27 @@ void * empower_agent::agent_loop(void * args)
   return 0;
 }
 
+/* Routine:
+ *    empower_agent::stop
+ * 
+ * Abstract:
+ *    Stops the agent thread and trigger the release of its resources.
+ * 
+ * Assumptions:
+ *    ---
+ * 
+ * Arguments:
+ *    ---
+ * 
+ * Returns:
+ *    ---
+ */
 void empower_agent::stop()
 {
   if(m_state != AGENT_STATE_STOPPED) {
     m_state = AGENT_STATE_STOPPED;
 
     pthread_join(m_thread, 0);
-
     Debug("Agent stopped!\n");
   }
 

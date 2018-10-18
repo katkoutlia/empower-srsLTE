@@ -24,8 +24,8 @@
  *
  */
 
-#ifndef SCHED_HARQ_H
-#define SCHED_HARQ_H
+#ifndef SRSENB_SCHEDULER_HARQ_H
+#define SRSENB_SCHEDULER_HARQ_H
 
 #include <map>
 #include "srslte/common/log.h"
@@ -93,17 +93,18 @@ class ul_harq_proc : public harq_proc
 {
 public:
   
-  typedef struct {
+  struct ul_alloc_t {
     uint32_t RB_start;
     uint32_t L;
-  } ul_alloc_t;
+    inline void set(uint32_t start, uint32_t len) {RB_start = start; L = len;}
+  };
   
   void       new_tx(uint32_t tti, int mcs, int tbs);
   
   ul_alloc_t get_alloc();
   void       set_alloc(ul_alloc_t alloc);
-  void       same_alloc();
-  bool       is_adaptive_retx(); 
+  void       re_alloc(ul_alloc_t alloc);
+  bool       is_adaptive_retx();
 
   void       reset_pending_data();
   bool       has_pending_ack();
@@ -125,4 +126,4 @@ private:
 }      
 
 
-#endif 
+#endif // SRSENB_SCHEDULER_HARQ_H

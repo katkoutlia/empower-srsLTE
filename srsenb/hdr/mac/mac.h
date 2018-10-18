@@ -24,8 +24,8 @@
  *
  */
 
-#ifndef MAC_H
-#define MAC_H
+#ifndef SRSENB_MAC_H
+#define SRSENB_MAC_H
 
 #include <vector>
 #include "srslte/common/log.h"
@@ -36,10 +36,14 @@
 #include "srslte/common/threads.h"
 #include "srslte/common/tti_sync_cv.h"
 #include "srslte/common/mac_pcap.h"
-#include "mac/scheduler.h"
-#include "mac/scheduler_metric.h"
+#include "scheduler.h"
+#include "scheduler_metric.h"
 #include "srslte/interfaces/enb_metrics_interface.h"
-#include "mac/ue.h"
+#include "ue.h"
+
+#ifdef HAVE_RAN_SLICER
+#include "srsenb/hdr/mac/scheduler_RAN.h"
+#endif
 
 namespace srsenb {
   
@@ -57,7 +61,8 @@ typedef struct {
 class mac
     :public mac_interface_phy, 
      public mac_interface_rlc, 
-     public mac_interface_rrc,     
+     public mac_interface_rrc,
+     public mac_interface_ran,     
      public srslte::mac_interface_timers, 
      public pdu_process_handler
 {
@@ -83,7 +88,8 @@ public:
     
   int get_dl_sched(uint32_t tti, dl_sched_t *dl_sched_res);
   int get_ul_sched(uint32_t tti, ul_sched_t *ul_sched_res);
-
+  int get_mch_sched(bool is_mcch, dl_sched_t *dl_sched_res);
+  void build_mch_sched(uint32_t tbs);
   void rl_failure(uint16_t rnti);
   void rl_ok(uint16_t rnti); 
   void tti_clock(); 
@@ -103,8 +109,28 @@ public:
   /* Manages UE bearers and associated configuration */
   int bearer_ue_cfg(uint16_t rnti, uint32_t lc_id, sched_interface::ue_bearer_cfg_t *cfg); 
   int bearer_ue_rem(uint16_t rnti, uint32_t lc_id); 
+
+  /******** Interface from RLC (RLC -> MAC) ****************/ 
+
   int rlc_buffer_state(uint16_t rnti, uint32_t lc_id, uint32_t tx_queue, uint32_t retx_queue);
-    
+
+  /******** Interface from RAN (RAN -> MAC) ****************/ 
+
+  // Adds a new slice at MAC layer
+  int  add_slice(uint64_t id);
+  // Removes an existing slice from MAC layer
+  void rem_slice(uint64_t id);
+  // Set the properties of a slice 
+  int set_slice(uint64_t id, mac_set_slice_args * args);
+  // Adds a new slice user at MAC layer
+  int  add_slice_user(uint16_t rnti, uint64_t slice, int lock);
+  // Removes an existing slice user from MAC layer
+  void rem_slice_user(uint16_t rnti, uint64_t slice);
+  // Get the slice scheduler ID
+  uint32_t get_slice_sched();
+  // Get a slice MAC details
+  int  get_slice(uint64_t id, mac_set_slice_args * args);
+
   bool process_pdus(); 
 
   // Interface for upper-layer timers
@@ -114,16 +140,17 @@ public:
 
   uint32_t get_current_tti();
   void get_metrics(mac_metrics_t metrics[ENB_METRICS_MAX_USERS]);
-
+  void write_mcch(LIBLTE_RRC_SYS_INFO_BLOCK_TYPE_2_STRUCT *sib2, LIBLTE_RRC_SYS_INFO_BLOCK_TYPE_13_STRUCT *sib13, LIBLTE_RRC_MCCH_MSG_STRUCT *mcch);
 private:  
 
   static const int MAX_LOCATIONS = 20;
   static const uint32_t cfi = 3; 
   srslte_dci_location_t locations[MAX_LOCATIONS];
   
-  static const int MAC_PDU_THREAD_PRIO  = 3;
+  static const int MAC_PDU_THREAD_PRIO  = 60;
 
-  
+  // We use a rwlock in MAC to allow multiple workers to access MAC simultaneously. No conflicts will happen since access for different TTIs
+  pthread_rwlock_t rwlock;
   
   // Interaction with PHY 
   phy_interface_mac    *phy_h; 
@@ -140,9 +167,19 @@ private:
 
   /* Scheduler unit */
   sched            scheduler; 
+#if HAVE_RAN_SLICER
+  /* I keep the same name to preserve any reference around */
+  dl_metric_ran    sched_metric_dl_ran;
+#else /* HAVE_RAN_SLICER */
   dl_metric_rr     sched_metric_dl_rr;
+#endif /* HAVE_RAN_SLICER */
   ul_metric_rr     sched_metric_ul_rr;
-
+  sched_interface::cell_cfg_t cell_config;
+  
+  
+  sched_interface::dl_pdu_mch_t mch;
+  
+  
   /* Map of active UEs */
   std::map<uint16_t, ue*> ue_db;   
   uint16_t        last_rnti;   
@@ -171,6 +208,16 @@ private:
   srslte_softbuffer_tx_t bcch_softbuffer_tx[NOF_BCCH_DLSCH_MSG];
   srslte_softbuffer_tx_t pcch_softbuffer_tx;
   srslte_softbuffer_tx_t rar_softbuffer_tx;
+  
+  const static int mcch_payload_len = 3000; //TODO FIND OUT MAX LENGTH
+  int current_mcch_length;
+  uint8_t mcch_payload_buffer[mcch_payload_len];
+  LIBLTE_RRC_MCCH_MSG_STRUCT mcch;
+  LIBLTE_RRC_SYS_INFO_BLOCK_TYPE_2_STRUCT sib2; 
+  LIBLTE_RRC_SYS_INFO_BLOCK_TYPE_13_STRUCT sib13;
+  
+  const static int mtch_payload_len = 10000;
+  uint8_t mtch_payload_buffer[mtch_payload_len];
   
   /* Functions for MAC Timers */
   srslte::timers  timers_db;
@@ -212,6 +259,6 @@ private:
   
 };
 
-} // namespace srsue
+} // namespace srsenb
 
-#endif // MAC_H
+#endif // SRSENB_MAC_H
