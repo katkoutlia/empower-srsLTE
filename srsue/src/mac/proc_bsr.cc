@@ -29,9 +29,9 @@
 #define Info(fmt, ...)    log_h->info(fmt, ##__VA_ARGS__)
 #define Debug(fmt, ...)   log_h->debug(fmt, ##__VA_ARGS__)
 
-#include "mac/proc_bsr.h"
-#include "mac/mac.h"
-#include "mac/mux.h"
+#include "srsue/hdr/mac/proc_bsr.h"
+#include "srsue/hdr/mac/mac.h"
+#include "srsue/hdr/mac/mux.h"
 
 
   namespace srsue {
@@ -41,8 +41,15 @@ bsr_proc::bsr_proc()
   initiated = false; 
   last_print = 0; 
   next_tx_tti = 0; 
-  triggered_bsr_type=NONE; 
-  
+  triggered_bsr_type=NONE;
+
+  for (int i=0;i<MAX_LCID;i++)  {
+    lcg[i]        = -1;
+    priorities[i] = -1;
+    last_pending_data[i] = 0;
+  }
+  lcg[0] = 0;
+  priorities[0] = 99;
 }
 
 void bsr_proc::init(rlc_interface_mac *rlc_, srslte::log* log_h_, mac_interface_rrc::mac_cfg_t *mac_cfg_, srslte::timers *timers_db_)
@@ -68,15 +75,8 @@ void bsr_proc::reset()
   
   reset_sr = false; 
   sr_is_sent = false; 
-  triggered_bsr_type = NONE; 
-  for (int i=0;i<MAX_LCID;i++)  {
-    lcg[i]        = -1; 
-    priorities[i] = -1; 
-    last_pending_data[i] = 0; 
-  }        
-  lcg[0] = 0; 
-  priorities[0] = 99;   
-  next_tx_tti = 0; 
+  triggered_bsr_type = NONE;
+  next_tx_tti = 0;
 }
 
 /* Process Periodic BSR */
@@ -209,7 +209,11 @@ bool bsr_proc::generate_bsr(bsr_t *bsr, uint32_t nof_padding_bytes) {
     if (nof_lcg > 1) {
       bsr->format = LONG_BSR;
     }  
-  }     
+  }
+  Info("BSR:   Type %s, Format %s, Value=%d,%d,%d,%d\n",
+       bsr_type_tostring(triggered_bsr_type), bsr_format_tostring(bsr->format),
+       bsr->buff_size[0], bsr->buff_size[1], bsr->buff_size[2], bsr->buff_size[3]);
+
   return ret; 
 }
 
@@ -337,10 +341,7 @@ bool bsr_proc::generate_padding_bsr(uint32_t nof_padding_bytes, bsr_t *bsr)
     }
     generate_bsr(bsr, nof_padding_bytes);
     ret = true; 
-    Info("BSR:   Type %s, Format %s, Value=%d,%d,%d,%d\n", 
-         bsr_type_tostring(triggered_bsr_type), bsr_format_tostring(bsr->format), 
-         bsr->buff_size[0], bsr->buff_size[1], bsr->buff_size[2], bsr->buff_size[3]);
-    
+
     if (timers_db->get(timer_periodic_id)->get_timeout() && bsr->format != TRUNC_BSR) {
       timers_db->get(timer_periodic_id)->reset();
       timers_db->get(timer_periodic_id)->run();

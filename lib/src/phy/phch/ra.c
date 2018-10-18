@@ -150,7 +150,8 @@ int srslte_ra_ul_dci_to_grant_prb_allocation(srslte_ra_ul_dci_t *dci, srslte_ra_
     // starting prb idx for slot 0 is as given by resource grant
     grant->n_prb[0] = n_prb_1;
     if (n_prb_1 < n_rb_ho/2) {
-      fprintf(stderr, "Invalid Frequency Hopping parameters. Offset: %d, n_prb_1: %d\n", n_rb_ho, n_prb_1);
+      INFO("Invalid Frequency Hopping parameters. Offset: %d, n_prb_1: %d\n", n_rb_ho, n_prb_1);
+      return SRSLTE_ERROR;
     }
     uint32_t n_prb_1_tilde = n_prb_1;
 
@@ -312,10 +313,15 @@ int srslte_ra_dl_dci_to_grant_prb_allocation(srslte_ra_dl_dci_t *dci, srslte_ra_
     memcpy(&grant->prb_idx[1], &grant->prb_idx[0], SRSLTE_MAX_PRB*sizeof(bool));
     break;
   case SRSLTE_RA_ALLOC_TYPE1:
+    // Make sure the rbg_subset is valid
+    if (dci->type1_alloc.rbg_subset >= P) {
+      return SRSLTE_ERROR;
+    }
     n_rb_type1 = srslte_ra_type1_N_rb(nof_prb);
-    if (dci->type1_alloc.rbg_subset < (nof_prb / P) % P) {
+    uint32_t temp = ((nof_prb - 1) / P) % P;
+    if (dci->type1_alloc.rbg_subset < temp) {
       n_rb_rbg_subset = ((nof_prb - 1) / (P * P)) * P + P;
-    } else if (dci->type1_alloc.rbg_subset == ((nof_prb / P) % P)) {
+    } else if (dci->type1_alloc.rbg_subset == temp) {
       n_rb_rbg_subset = ((nof_prb - 1) / (P * P)) * P + ((nof_prb - 1) % P) + 1;
     } else {
       n_rb_rbg_subset = ((nof_prb - 1) / (P * P)) * P;
@@ -324,10 +330,9 @@ int srslte_ra_dl_dci_to_grant_prb_allocation(srslte_ra_dl_dci_t *dci, srslte_ra_
     bitmask = dci->type1_alloc.vrb_bitmask;
     for (i = 0; i < n_rb_type1; i++) {
       if (bitmask & (1 << (n_rb_type1 - i - 1))) {
-        if ((((i + shift) / P)
-            * P * P + dci->type1_alloc.rbg_subset * P + (i + shift) % P) < nof_prb) {
-          grant->prb_idx[0][((i + shift) / P)
-            * P * P + dci->type1_alloc.rbg_subset * P + (i + shift) % P] = true;
+        uint32_t idx = (((i + shift) / P) * P * P + dci->type1_alloc.rbg_subset * P + (i + shift) % P);
+        if (idx < nof_prb) {
+          grant->prb_idx[0][idx] = true;
           grant->nof_prb++;
         } else {
           return SRSLTE_ERROR;
@@ -523,6 +528,7 @@ static int dl_dci_to_grant_mcs(srslte_ra_dl_dci_t *dci, srslte_ra_dl_grant_t *gr
     }
     grant->mcs[0].mod = SRSLTE_MOD_QPSK;
     grant->mcs[0].tbs = (uint32_t) tbs;
+    grant->mcs[0].idx = dci->mcs_idx;
   } else {
     n_prb = grant->nof_prb;
     if (dci->tb_en[0]) {
@@ -555,7 +561,7 @@ static int dl_dci_to_grant_mcs(srslte_ra_dl_dci_t *dci, srslte_ra_dl_grant_t *gr
 }
 
 void srslte_ra_dl_grant_to_nbits(srslte_ra_dl_grant_t *grant, uint32_t cfi, srslte_cell_t cell, uint32_t sf_idx,
-                                 srslte_ra_nbits_t nbits [SRSLTE_MAX_CODEWORDS])
+                                 srslte_ra_nbits_t nbits[SRSLTE_MAX_CODEWORDS])
 {
   // Compute number of RE 
   for (int i = 0; i < SRSLTE_MAX_TB; i++) {

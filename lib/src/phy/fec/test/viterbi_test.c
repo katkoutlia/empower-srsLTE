@@ -278,7 +278,9 @@ int main(int argc, char **argv) {
   free(symbols);
   free(llr);
   free(llr_c);
+  free(llr_s);
   free(data_rx);
+  free(data_rx2);
   
   if (snr_points == 1) {
     int expected_errors = get_expected_errors(nof_frames, seed, frame_length, tail_biting, ebno_db);

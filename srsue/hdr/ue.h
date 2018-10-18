@@ -30,8 +30,8 @@
  *              layers and helpers.
  *****************************************************************************/
 
-#ifndef UE_H
-#define UE_H
+#ifndef SRSUE_UE_H
+#define SRSUE_UE_H
 
 #include <stdarg.h>
 #include <string>
@@ -69,16 +69,23 @@ public:
 
   bool init(all_args_t *args_);
   void stop();
+  bool switch_on();
+  bool switch_off();
   bool is_attached();
   void start_plot();
+  void print_mbms();
+  bool mbms_service_start(uint32_t serv, uint32_t port);
+
+  void print_pool();
 
   static void rf_msg(srslte_rf_error_t error);
-  void handle_rf_msg(srslte_rf_error_t error);
 
   // UE metrics interface
   bool get_metrics(ue_metrics_t &m);
 
   void pregenerate_signals(bool enable);
+
+  void radio_overflow();
 
 private:
   virtual ~ue();
@@ -93,14 +100,14 @@ private:
   srsue::rrc         rrc;
   srsue::nas         nas;
   srsue::gw          gw;
-  srsue::usim        usim;
+  srsue::usim_base*  usim;
 
   srslte::logger_stdout logger_stdout;
   srslte::logger_file   logger_file;
   srslte::logger        *logger;
 
   // rf_log is on ue_base
-  std::vector<void*>  phy_log;
+  std::vector<srslte::log_filter*>  phy_log;
   srslte::log_filter  mac_log;
   srslte::log_filter  rlc_log;
   srslte::log_filter  pdcp_log;
@@ -108,8 +115,7 @@ private:
   srslte::log_filter  nas_log;
   srslte::log_filter  gw_log;
   srslte::log_filter  usim_log;
-
-  srslte::byte_buffer_pool *pool;
+  srslte::log_filter  pool_log;
 
   all_args_t       *args;
   bool              started;
@@ -119,5 +125,5 @@ private:
 
 } // namespace srsue
 
-#endif // UE_H
+#endif // SRSUE_UE_H
   

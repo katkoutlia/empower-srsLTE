@@ -41,11 +41,9 @@
 
 #define MAX_TIME_OFFSET 128
 
-#define TRACK_MAX_LOST          4
+#define TRACK_MAX_LOST          10
 #define TRACK_FRAME_SIZE        32
 #define FIND_NOF_AVG_FRAMES     4
-#define DEFAULT_SAMPLE_OFFSET_CORRECT_PERIOD  0
-#define DEFAULT_SFO_EMA_COEFF                 0.1
 
 
 cf_t dummy_buffer0[15*2048/2];
@@ -142,20 +140,17 @@ void srslte_ue_sync_reset(srslte_ue_sync_t *q) {
   q->frame_find_cnt = 0;
 }
 
-
-int srslte_ue_sync_start_agc(srslte_ue_sync_t *q, double (set_gain_callback)(void*, double), float init_gain_value) {
-  uint32_t nframes; 
-  if (q->nof_recv_sf == 1) {
-    nframes = 10; 
-  } else {
-    nframes = 0; 
-  }
-  int n = srslte_agc_init_uhd(&q->agc, SRSLTE_AGC_MODE_PEAK_AMPLITUDE, nframes, set_gain_callback, q->stream); 
+int srslte_ue_sync_start_agc(srslte_ue_sync_t *q,
+                             double (set_gain_callback)(void *, double),
+                             double min_gain,
+                             double max_gain,
+                             double init_gain_value) {
+  int n = srslte_agc_init_uhd(&q->agc, SRSLTE_AGC_MODE_PEAK_AMPLITUDE, 0, set_gain_callback, q->stream);
   q->do_agc = n==0?true:false;
   if (q->do_agc) {
+    srslte_agc_set_gain_range(&q->agc, min_gain, max_gain);
     srslte_agc_set_gain(&q->agc, init_gain_value);
-    srslte_agc_set_target(&q->agc, 0.3);
-    srslte_agc_set_bandwidth(&q->agc, 0.8);
+    srslte_ue_sync_set_agc_period(q, 4);
   }
   return n; 
 }
@@ -329,7 +324,6 @@ int srslte_ue_sync_set_cell(srslte_ue_sync_t *q, srslte_cell_t cell)
     memcpy(&q->cell, &cell, sizeof(srslte_cell_t));
     q->fft_size = srslte_symbol_sz(q->cell.nof_prb);
     q->sf_len = SRSLTE_SF_LEN(q->fft_size);
-    q->agc_period = 0;
 
     if (cell.id == 1000) {
 
@@ -394,7 +388,7 @@ int srslte_ue_sync_set_cell(srslte_ue_sync_t *q, srslte_cell_t cell)
       srslte_sync_set_em_alpha(&q->sfind,   1);
       srslte_sync_set_threshold(&q->sfind,  3.0);
 
-      srslte_sync_set_em_alpha(&q->strack,  0.2);
+      srslte_sync_set_em_alpha(&q->strack,  0.0);
       srslte_sync_set_threshold(&q->strack, 1.2);
 
     }
@@ -472,14 +466,14 @@ void srslte_ue_sync_set_cfo_tol(srslte_ue_sync_t *q, float cfo_tol) {
 }
 
 float srslte_ue_sync_get_sfo(srslte_ue_sync_t *q) {
-  return q->mean_sfo/5e-3;
+  return q->mean_sample_offset/5e-3;
 }
 
 int srslte_ue_sync_get_last_sample_offset(srslte_ue_sync_t *q) {
   return q->last_sample_offset; 
 }
 
-void srslte_ue_sync_set_sample_offset_correct_period(srslte_ue_sync_t *q, uint32_t nof_subframes) {
+void srslte_ue_sync_set_sfo_correct_period(srslte_ue_sync_t *q, uint32_t nof_subframes) {
   q->sample_offset_correct_period = nof_subframes; 
 }
 
@@ -571,7 +565,7 @@ static int track_peak_ok(srslte_ue_sync_t *q, uint32_t track_idx) {
   uint32_t frame_idx = 0; 
   if (q->sample_offset_correct_period) {
     frame_idx = q->frame_ok_cnt%q->sample_offset_correct_period;
-    q->mean_sample_offset += (float) q->last_sample_offset/q->sample_offset_correct_period;
+    q->mean_sample_offset = SRSLTE_VEC_EMA((float) q->last_sample_offset, q->mean_sample_offset, q->sfo_ema);
   } else {    
     q->mean_sample_offset = q->last_sample_offset; 
   }
@@ -597,23 +591,12 @@ static int track_peak_ok(srslte_ue_sync_t *q, uint32_t track_idx) {
   if (!frame_idx) {
     // Adjust RF sampling time based on the mean sampling offset
     q->next_rf_sample_offset = (int) round(q->mean_sample_offset);
-    
-    // Reset PSS averaging if correcting every a period longer than 1
-    if (q->sample_offset_correct_period > 1) {
-      srslte_sync_reset(&q->strack);
-    }
-    
-    // Compute SFO based on mean sample offset 
-    if (q->sample_offset_correct_period) {
-      q->mean_sample_offset /= q->sample_offset_correct_period;
-    }
-    q->mean_sfo = SRSLTE_VEC_EMA(q->mean_sample_offset, q->mean_sfo, q->sfo_ema);
 
     if (q->next_rf_sample_offset) {
-      INFO("Time offset adjustment: %d samples (%.2f), mean SFO: %.2f Hz, %.5f samples/5-sf, ema=%f, length=%d\n", 
+      INFO("Time offset adjustment: %d samples (%.2f), mean SFO: %.2f Hz, ema=%f, length=%d\n",
            q->next_rf_sample_offset, q->mean_sample_offset,
            srslte_ue_sync_get_sfo(q), 
-           q->mean_sfo, q->sfo_ema, q->sample_offset_correct_period);    
+           q->sfo_ema, q->sample_offset_correct_period);    
     }
     q->mean_sample_offset = 0; 
   }
@@ -751,7 +734,7 @@ int srslte_ue_sync_zerocopy_multi(srslte_ue_sync_t *q, cf_t *input_buffer[SRSLTE
               break;
             case SRSLTE_SYNC_FOUND_NOSPACE:
               /* If a peak was found but there is not enough space for SSS/CP detection, discard a few samples */
-              INFO("No space for SSS/CP detection. Realigning frame...\n",0);
+              INFO("No space for SSS/CP detection. Realigning frame...\n");
               q->recv_callback(q->stream, dummy_offset_buffer, q->frame_len/2, NULL); 
               srslte_sync_reset(&q->sfind);
               ret = SRSLTE_SUCCESS; 
@@ -763,7 +746,9 @@ int srslte_ue_sync_zerocopy_multi(srslte_ue_sync_t *q, cf_t *input_buffer[SRSLTE
           if (q->do_agc) {
             srslte_agc_process(&q->agc, input_buffer[0], q->sf_len);        
           }
-          
+
+          INFO("SYNC FIND: sf_idx=%d, ret=%d, next_state=%d\n", q->sf_idx, ret, q->state);
+
         break;
         case SF_TRACK:
          
@@ -789,7 +774,7 @@ int srslte_ue_sync_zerocopy_multi(srslte_ue_sync_t *q, cf_t *input_buffer[SRSLTE
             if (q->do_agc && (q->agc_period == 0 || 
                              (q->agc_period && (q->frame_total_cnt%q->agc_period) == 0))) 
             {
-              srslte_agc_process(&q->agc, input_buffer[0], q->sf_len);        
+              srslte_agc_process(&q->agc, input_buffer[0], q->sf_len);
             }
 
             /* Track PSS/SSS around the expected PSS position
@@ -825,6 +810,9 @@ int srslte_ue_sync_zerocopy_multi(srslte_ue_sync_t *q, cf_t *input_buffer[SRSLTE
 
             q->frame_total_cnt++;
           }
+
+          INFO("SYNC TRACK: sf_idx=%d, ret=%d, next_state=%d\n", q->sf_idx, ret, q->state);
+
         break;
       }
     }

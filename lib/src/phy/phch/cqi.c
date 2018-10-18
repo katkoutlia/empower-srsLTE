@@ -234,6 +234,87 @@ int srslte_cqi_value_unpack(uint8_t buff[SRSLTE_CQI_MAX_BITS], srslte_cqi_value_
   return -1; 
 }
 
+/*******************************************************
+ *                TO STRING FUNCTIONS                  *
+ *******************************************************/
+
+static int srslte_cqi_format2_wideband_tostring(srslte_cqi_format2_wideband_t *msg, char *buff, uint32_t buff_len) {
+  int n = 0;
+
+  n += snprintf(buff + n, buff_len - n, ", cqi=%d", msg->wideband_cqi);
+
+  if (msg->pmi_present) {
+    if (msg->rank_is_not_one) {
+      n += snprintf(buff + n, buff_len - n, ", diff_cqi=%d", msg->spatial_diff_cqi);
+    }
+    n += snprintf(buff + n, buff_len - n, ", pmi=%d", msg->pmi);
+  }
+
+  return n;
+}
+
+static int srslte_cqi_format2_subband_tostring(srslte_cqi_format2_subband_t *msg, char *buff, uint32_t buff_len) {
+  int n = 0;
+
+  n += snprintf(buff + n, buff_len - n, ", cqi=%d", msg->subband_cqi);
+  n += snprintf(buff + n, buff_len - n, ", label=%d", msg->subband_label);
+
+  return n;
+}
+
+static int srslte_cqi_ue_subband_tostring(srslte_cqi_ue_subband_t *msg, char *buff, uint32_t buff_len) {
+  int n = 0;
+
+  n += snprintf(buff + n, buff_len - n, ", cqi=%d", msg->wideband_cqi);
+  n += snprintf(buff + n, buff_len - n, ", diff_cqi=%d", msg->subband_diff_cqi);
+  n += snprintf(buff + n, buff_len - n, ", L=%d", msg->L);
+
+  return n;
+}
+
+static int srslte_cqi_hl_subband_tostring(srslte_cqi_hl_subband_t *msg, char *buff, uint32_t buff_len) {
+  int n = 0;
+
+  n += snprintf(buff + n, buff_len - n, ", cqi=%d", msg->wideband_cqi_cw0);
+  n += snprintf(buff + n, buff_len - n, ", diff=%d", msg->subband_diff_cqi_cw0);
+
+  if (msg->rank_is_not_one) {
+    n += snprintf(buff + n, buff_len - n, ", cqi1=%d", msg->wideband_cqi_cw1);
+    n += snprintf(buff + n, buff_len - n, ", diff1=%d", msg->subband_diff_cqi_cw1);
+  }
+
+  if (msg->pmi_present) {
+    n += snprintf(buff + n, buff_len - n, ", pmi=%d", msg->pmi);
+  }
+
+  n += snprintf(buff + n, buff_len - n, ", N=%d", msg->N);
+
+  return n;
+}
+
+int srslte_cqi_value_tostring(srslte_cqi_value_t *value, char *buff, uint32_t buff_len) {
+  int ret = -1;
+
+  switch (value->type) {
+    case SRSLTE_CQI_TYPE_WIDEBAND:
+      ret = srslte_cqi_format2_wideband_tostring(&value->wideband, buff, buff_len);
+      break;
+    case SRSLTE_CQI_TYPE_SUBBAND:
+      ret = srslte_cqi_format2_subband_tostring(&value->subband, buff, buff_len);
+      break;
+    case SRSLTE_CQI_TYPE_SUBBAND_UE:
+      ret = srslte_cqi_ue_subband_tostring(&value->subband_ue, buff, buff_len);
+      break;
+    case SRSLTE_CQI_TYPE_SUBBAND_HL:
+      ret = srslte_cqi_hl_subband_tostring(&value->subband_hl, buff, buff_len);
+      break;
+    default:
+      /* Do nothing */;
+  }
+
+  return ret;
+}
+
 int srslte_cqi_size(srslte_cqi_value_t *value) {
   int size = 0;
 
@@ -383,7 +464,7 @@ bool srslte_ri_send(uint32_t I_cqi_pmi, uint32_t I_ri, uint32_t tti) {
     return false;
   }
 
-  if (M_ri) {
+  if (M_ri && N_p) {
     if ((tti - N_offset_p + N_offset_ri) % (N_p * M_ri) == 0) {
       return true;
     }
@@ -407,7 +488,7 @@ float srslte_cqi_to_coderate(uint32_t cqi) {
  * Table III. 
 */
 // From paper
-static float cqi_to_snr_table[15] = { 1.95, 4, 6, 8, 10, 11.95, 14.05, 16, 17.9, 19.9, 21.5, 23.45, 25.0, 27.30, 29};
+static float cqi_to_snr_table[15] = { 1.95, 4, 6, 8, 10, 11.95, 14.05, 16, 17.9, 20.9, 22.5, 24.75, 25.5, 27.30, 29};
 
 // From experimental measurements @ 5 MHz 
 //static float cqi_to_snr_table[15] = { 1, 1.75, 3, 4, 5, 6, 7.5, 9, 11.5, 13.0, 15.0, 18, 20, 22.5, 26.5};
@@ -456,8 +537,16 @@ int srslte_cqi_hl_get_no_subbands(int nof_prb)
 
 void srslte_cqi_to_str(const uint8_t *cqi_value, int cqi_len, char *str, int str_len) {
   int i = 0;
-  for (i = 0; i < cqi_len && i < (str_len - 1); i++) {
+
+  for (i = 0; i < cqi_len && i < (str_len - 5); i++) {
     str[i] = (cqi_value[i] == 0)?(char)'0':(char)'1';
+  }
+
+  if (i == (str_len - 5)) {
+    str[i++] = '.';
+    str[i++] = '.';
+    str[i++] = '.';
+    str[i++] = (cqi_value[cqi_len - 1] == 0)?(char)'0':(char)'1';
   }
   str[i] = '\0';
 }

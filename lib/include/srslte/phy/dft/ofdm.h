@@ -25,8 +25,8 @@
  */
 
 
-#ifndef LTEFFT_
-#define LTEFFT_
+#ifndef SRSLTE_OFDM_H
+#define SRSLTE_OFDM_H
 
 /**********************************************************************************************
  *  File:         ofdm.h
@@ -92,7 +92,7 @@ SRSLTE_API int srslte_ofdm_rx_init_mbsfn(srslte_ofdm_t *q,
                                          srslte_cp_t cp_type,
                                          cf_t *in_buffer,
                                          cf_t *out_buffer,
-                                         uint32_t nof_prb);
+                                         uint32_t max_prb);
 
 SRSLTE_API int srslte_ofdm_rx_init(srslte_ofdm_t *q, 
                                srslte_cp_t cp_type, 
@@ -158,4 +158,4 @@ SRSLTE_API void srslte_ofdm_set_non_mbsfn_region(srslte_ofdm_t *q,
                                                uint8_t non_mbsfn_region);
 
 
-#endif
+#endif // SRSLTE_OFDM_H

@@ -24,12 +24,13 @@
  *
  */
 
-#ifndef INTERFACE_COMMON_H
-#define INTERFACE_COMMON_H
+#ifndef SRSLTE_INTERFACES_COMMON_H
+#define SRSLTE_INTERFACES_COMMON_H
 
 #include "srslte/common/timers.h"
 #include "srslte/common/security.h"
 #include "srslte/asn1/liblte_rrc.h"
+#include <string>
 
 
 namespace srslte {
@@ -37,11 +38,19 @@ namespace srslte {
 class srslte_nas_config_t
 {
 public:
-  srslte_nas_config_t(uint32_t lcid_ = 0)
-    :lcid(lcid_)
+  srslte_nas_config_t(uint32_t lcid_ = 0, std::string apn_ = "", std::string user_ = "", std::string pass_ = "", bool force_imsi_attach_ = false)
+    :lcid(lcid_),
+     apn(apn_),
+     user(user_),
+     pass(pass_),
+     force_imsi_attach(force_imsi_attach_)
     {}
 
-  uint32_t lcid;
+  uint32_t    lcid;
+  std::string apn;
+  std::string user;
+  std::string pass;
+  bool        force_imsi_attach;
 };
 
 
@@ -93,4 +102,4 @@ public:
 
 }
 
-#endif
+#endif // SRSLTE_INTERFACES_COMMON_H

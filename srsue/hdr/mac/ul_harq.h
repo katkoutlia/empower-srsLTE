@@ -24,8 +24,8 @@
  *
  */
 
-#ifndef ULHARQ_H
-#define ULHARQ_H
+#ifndef SRSUE_UL_HARQ_H
+#define SRSUE_UL_HARQ_H
 
 #define Error(fmt, ...)   log_h->error(fmt, ##__VA_ARGS__)
 #define Warning(fmt, ...) log_h->warning(fmt, ##__VA_ARGS__)
@@ -34,8 +34,8 @@
 
 #include "srslte/interfaces/ue_interfaces.h"
 #include "srslte/common/log.h"
-#include "mac/mux.h"
-#include "mac/ul_sps.h"
+#include "mux.h"
+#include "ul_sps.h"
 #include "srslte/common/mac_pcap.h"
 #include "srslte/common/timers.h"
 #include "srslte/common/interfaces_common.h"
@@ -145,8 +145,13 @@ public:
 private:
   class ul_harq_process {
   public:
-    ul_harq_process()
-    {
+    ul_harq_process() {
+      pid = 0;
+      harq_feedback = false;
+      log_h = NULL;
+      bzero(&softbuffer, sizeof(srslte_softbuffer_tx_t));
+      is_msg3 = false;
+      pdu_ptr = NULL;
       current_tx_nb = 0;
       current_irv = 0;
       is_initiated = false;
@@ -201,7 +206,7 @@ private:
     {
       if (ack) {
         if (grant) {
-          if (grant->ndi[0] == get_ndi()) {
+          if (grant->ndi[0] == get_ndi() && grant->phy_grant.ul.mcs.tbs != 0) {
             *ack = false;
           }
         }
@@ -210,7 +215,7 @@ private:
 
       // Reset HARQ process if TB has changed
       if (harq_feedback && has_grant() && grant) {
-        if (grant->n_bytes[0] != cur_grant.n_bytes[0] && cur_grant.n_bytes[0] > 0) {
+        if (grant->n_bytes[0] != cur_grant.n_bytes[0] && cur_grant.n_bytes[0] > 0 && grant->n_bytes[0] > 0) {
           Debug("UL %d: Reset due to change of grant size last_grant=%d, new_grant=%d\n",
                pid, cur_grant.n_bytes[0], grant->n_bytes[0]);
           reset();
@@ -219,15 +224,21 @@ private:
 
       // Receive and route HARQ feedbacks
       if (grant) {
-        if ((!(grant->rnti_type == SRSLTE_RNTI_TEMP) && grant->ndi[0] != get_ndi() && harq_feedback) ||
+        if (grant->has_cqi_request && grant->phy_grant.ul.mcs.tbs == 0) {
+          /* Only CQI reporting (without SCH) */
+          memcpy(&action->phy_grant.ul, &grant->phy_grant.ul, sizeof(srslte_ra_ul_grant_t));
+          //memcpy(&cur_grant, grant, sizeof(Tgrant));
+          action->tx_enabled = true;
+          action->rnti = grant->rnti;
+        } else if ((!(grant->rnti_type == SRSLTE_RNTI_TEMP) && grant->ndi[0] != get_ndi() && harq_feedback) ||
             (grant->rnti_type == SRSLTE_RNTI_USER && !has_grant())                  ||
              grant->is_from_rar)
         {
           // New transmission
           reset();
 
-          // Uplink grant in a RAR
-          if (grant->is_from_rar) {
+          // Uplink grant in a RAR and there is a PDU in the Msg3 buffer
+          if (grant->is_from_rar && harq_entity->mux_unit->msg3_is_pending()) {
             Debug("Getting Msg3 buffer payload, grant size=%d bytes\n", grant->n_bytes[0]);
             pdu_ptr  = harq_entity->mux_unit->msg3_get(payload_buffer, grant->n_bytes[0]);
             if (pdu_ptr) {
@@ -238,6 +249,9 @@ private:
 
             // Normal UL grant
           } else {
+            if (grant->is_from_rar) {
+              grant->rnti = harq_entity->rntis->crnti;
+            }
             // Request a MAC PDU from the Multiplexing & Assemble Unit
             pdu_ptr = harq_entity->mux_unit->pdu_get(payload_buffer, grant->n_bytes[0], tti_tx, pid);
             if (pdu_ptr) {
@@ -257,7 +271,7 @@ private:
         generate_retx(tti_tx, action);
       }
       if (harq_entity->pcap && grant) {
-        if (grant->is_from_rar) {
+        if (grant->is_from_rar && harq_entity->rntis->temp_rnti) {
           grant->rnti = harq_entity->rntis->temp_rnti;
         }
         harq_entity->pcap->write_ul_crnti(pdu_ptr, grant->n_bytes[0], grant->rnti, get_nof_retx(), tti_tx);
@@ -290,7 +304,7 @@ private:
     bool                        is_msg3;
     bool                        is_initiated;    
     uint32_t                    tti_last_tx;
-    
+
     
     const static int payload_buffer_len = 128*1024; 
     uint8_t *payload_buffer;
@@ -323,7 +337,7 @@ private:
 
       // HARQ entity requests an adaptive transmission
       if (grant) {
-        if (grant->rv) {
+        if (grant->rv[0]) {
           current_irv = irv_of_rv[grant->rv[0]%4];
         }
 
@@ -415,4 +429,4 @@ private:
 
 } // namespace srsue
 
-#endif // ULHARQ_H
+#endif // SRSUE_UL_HARQ_H

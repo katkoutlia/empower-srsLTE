@@ -58,7 +58,11 @@ void srslte_vec_sub_sss(const int16_t *x, const int16_t *y, int16_t *z, const ui
   srslte_vec_sub_sss_simd(x, y, z, len);
 }
 
-// Noise estimation in chest_dl, interpolation 
+void srslte_vec_sub_bbb(const int8_t *x, const int8_t *y, int8_t *z, const uint32_t len) {
+  srslte_vec_sub_bbb_simd(x, y, z, len);
+}
+
+// Noise estimation in chest_dl, interpolation
 void srslte_vec_sub_ccc(const cf_t *x, const cf_t *y, cf_t *z, const uint32_t len) {
   return srslte_vec_sub_fff((const float*) x,(const float*) y,(float*) z, 2*len);
 }
@@ -93,18 +97,29 @@ void srslte_vec_sc_prod_ccc(const cf_t *x, const cf_t h, cf_t *z, const uint32_t
 
 // Used in turbo decoder 
 void srslte_vec_convert_if(const int16_t *x, const float scale, float *z, const uint32_t len) {
-  int i;
-  for (i=0;i<len;i++) {
-    z[i] = ((float) x[i])/scale;
-  }
+  srslte_vec_convert_if_simd(x, z, scale, len);
 }
 
 void srslte_vec_convert_fi(const float *x, const float scale, int16_t *z, const uint32_t len) {
   srslte_vec_convert_fi_simd(x, z, scale, len);
 }
 
+void srslte_vec_convert_fb(const float *x, const float scale, int8_t *z, const uint32_t len) {
+  srslte_vec_convert_fb_simd(x, z, scale, len);
+}
+
 void srslte_vec_lut_sss(const short *x, const unsigned short *lut, short *y, const uint32_t len) {
   srslte_vec_lut_sss_simd(x, lut, y, len);
+}
+
+void srslte_vec_lut_bbb(const int8_t *x, const unsigned short *lut, int8_t *y, const uint32_t len) {
+  srslte_vec_lut_bbb_simd(x, lut, y, len);
+}
+
+void srslte_vec_lut_sis(const short *x, const unsigned int *lut, short *y, const uint32_t len) {
+  for (int i=0; i < len; i++) {
+    y[lut[i]] = x[i];
+  }
 }
 
 void *srslte_vec_malloc(uint32_t size) {
@@ -136,7 +151,7 @@ void srslte_vec_fprint_c(FILE *stream, cf_t *x, const uint32_t len) {
   int i;
   fprintf(stream, "[");
   for (i=0;i<len;i++) {
-    fprintf(stream, "%+2.2f%+2.2fi, ", __real__ x[i], __imag__ x[i]);
+    fprintf(stream, "%+2.5f%+2.5fi, ", __real__ x[i], __imag__ x[i]);
   }
   fprintf(stream, "];\n");
 }
@@ -156,6 +171,15 @@ void srslte_vec_fprint_b(FILE *stream, uint8_t *x, const uint32_t len) {
   fprintf(stream, "[");
   for (i=0;i<len;i++) {
     fprintf(stream, "%d, ", x[i]);
+  }
+  fprintf(stream, "];\n");
+}
+
+void srslte_vec_fprint_bs(FILE *stream, int8_t *x, const uint32_t len) {
+  int i;
+  fprintf(stream, "[");
+  for (i=0;i<len;i++) {
+    fprintf(stream, "%4d, ", x[i]);
   }
   fprintf(stream, "];\n");
 }
@@ -182,7 +206,7 @@ void srslte_vec_fprint_s(FILE *stream, short *x, const uint32_t len) {
   int i;
   fprintf(stream, "[");
   for (i=0;i<len;i++) {
-    fprintf(stream, "%d, ", x[i]);
+    fprintf(stream, "%4d, ", x[i]);
   }
   fprintf(stream, "];\n");
 }
@@ -203,10 +227,16 @@ void srslte_vec_fprint_hex(FILE *stream, uint8_t *x, const uint32_t len) {
   fprintf(stream, "];\n");
 }
 
-void srslte_vec_sprint_hex(char *str, uint8_t *x, const uint32_t len) {
+void srslte_vec_sprint_hex(char *str, const uint32_t max_str_len, uint8_t *x, const uint32_t len) {
   uint32_t i, nbytes; 
   uint8_t byte;
   nbytes = len/8;
+  // check that hex string fits in buffer (every byte takes 3 characters, plus brackets)
+  if ((3*(len/8 + ((len%8)?1:0))) + 2 >= max_str_len) {
+    fprintf(stderr, "Buffer too small for printing hex string (max_str_len=%d, payload_len=%d).\n", max_str_len, len);
+    return;
+  }
+
   int n=0;
   n+=sprintf(&str[n], "[");
   for (i=0;i<nbytes;i++) {
@@ -218,6 +248,7 @@ void srslte_vec_sprint_hex(char *str, uint8_t *x, const uint32_t len) {
     n+=sprintf(&str[n], "%02x ", byte);
   }
   n+=sprintf(&str[n], "]");
+  str[max_str_len-1] = 0;
 }
 
 void srslte_vec_save_file(char *filename, const void *buffer, const uint32_t len) {
@@ -261,9 +292,16 @@ void srslte_vec_prod_fff(const float *x, const float *y, float *z, const uint32_
   srslte_vec_prod_fff_simd(x, y, z, len);
 }
 
-// Scrambling Short
 void srslte_vec_prod_sss(const int16_t *x, const int16_t *y, int16_t *z, const uint32_t len) {
   srslte_vec_prod_sss_simd(x,y,z,len);
+}
+
+// Scrambling
+void srslte_vec_neg_sss(const int16_t *x, const int16_t *y, int16_t *z, const uint32_t len) {
+  srslte_vec_neg_sss_simd(x,y,z,len);
+}
+void srslte_vec_neg_bbb(const int8_t *x, const int8_t *y, int8_t *z, const uint32_t len) {
+  srslte_vec_neg_bbb_simd(x,y,z,len);
 }
 
 // CFO and OFDM processing
@@ -358,6 +396,10 @@ uint32_t srslte_vec_max_fi(const float *x, const uint32_t len) {
   return srslte_vec_max_fi_simd(x, len);
 }
 
+uint32_t srslte_vec_max_abs_fi(const float *x, const uint32_t len) {
+  return srslte_vec_max_abs_fi_simd(x, len);
+}
+
 // CP autocorr
 uint32_t srslte_vec_max_abs_ci(const cf_t *x, const uint32_t len) {
   return srslte_vec_max_ci_simd(x, len);
@@ -417,8 +459,8 @@ void srslte_vec_quant_sus(const int16_t *in, uint16_t *out, const float gain, co
   }
 }
 
-void srs_vec_cf_cpy(const cf_t *dst, cf_t *src, int len) {
-  srslte_vec_cp_simd(dst, src, len);
+void srs_vec_cf_cpy(const cf_t *src, cf_t *dst, int len) {
+  srslte_vec_cp_simd(src, dst, len);
 }
 
 void srslte_vec_interleave(const cf_t *x, const cf_t *y, cf_t *z, const int len) {
@@ -427,4 +469,8 @@ void srslte_vec_interleave(const cf_t *x, const cf_t *y, cf_t *z, const int len)
 
 void srslte_vec_interleave_add(const cf_t *x, const cf_t *y, cf_t *z, const int len) {
   srslte_vec_interleave_add_simd(x, y, z, len);
+}
+
+void srslte_vec_apply_cfo(const cf_t *x, float cfo, cf_t *z, int len) {
+  srslte_vec_apply_cfo_simd(x, cfo, z, len);
 }

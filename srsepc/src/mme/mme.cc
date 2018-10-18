@@ -29,13 +29,12 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/sctp.h>
-#include <boost/thread/mutex.hpp>
-#include "mme/mme.h"
+#include "srsepc/hdr/mme/mme.h"
 
 namespace srsepc{
 
 mme*          mme::m_instance = NULL;
-boost::mutex  mme_instance_mutex;
+pthread_mutex_t mme_instance_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 mme::mme():
   m_running(false)
@@ -52,25 +51,27 @@ mme::~mme()
 mme*
 mme::get_instance(void)
 {
-  boost::mutex::scoped_lock lock(mme_instance_mutex);
+  pthread_mutex_lock(&mme_instance_mutex);
   if(NULL == m_instance) {
     m_instance = new mme();
   }
+  pthread_mutex_unlock(&mme_instance_mutex);
   return(m_instance);
 }
 
 void
 mme::cleanup(void)
 {
-  boost::mutex::scoped_lock lock(mme_instance_mutex);
+  pthread_mutex_lock(&mme_instance_mutex);
   if(NULL != m_instance) {
     delete m_instance;
     m_instance = NULL;
   }
+  pthread_mutex_unlock(&mme_instance_mutex);
 }
 
 int
-mme::init(mme_args_t* args, srslte::log_filter *s1ap_log, srslte::log_filter *mme_gtpc_log)
+mme::init(mme_args_t* args, srslte::log_filter *s1ap_log, srslte::log_filter *mme_gtpc_log, hss_interface_s1ap * hss_)
 {
 
   /*Init logger*/
@@ -78,7 +79,7 @@ mme::init(mme_args_t* args, srslte::log_filter *s1ap_log, srslte::log_filter *mm
   m_mme_gtpc_log = mme_gtpc_log;
   /*Init S1AP*/
   m_s1ap = s1ap::get_instance();
-  if(m_s1ap->init(args->s1ap_args, s1ap_log)){
+  if(m_s1ap->init(args->s1ap_args, s1ap_log, hss_)){
     m_s1ap_log->error("Error initializing MME S1APP\n");
     exit(-1);
   }
@@ -114,7 +115,7 @@ mme::stop()
 void
 mme::run_thread()
 {
-  srslte::byte_buffer_t *pdu = m_pool->allocate();
+  srslte::byte_buffer_t *pdu = m_pool->allocate("mme::run_thread");
   uint32_t sz = SRSLTE_MAX_BUFFER_SIZE_BYTES - SRSLTE_BUFFER_HEADER_OFFSET;
 
   struct sockaddr_in enb_addr;

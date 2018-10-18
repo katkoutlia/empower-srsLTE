@@ -29,12 +29,21 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <srslte/phy/phch/pdsch_cfg.h>
+#include <srslte/srslte.h>
+
+#include <pthread.h>
+#include <semaphore.h>
 
 #include "prb_dl.h"
 #include "srslte/phy/phch/pdsch.h"
 #include "srslte/phy/utils/debug.h"
 #include "srslte/phy/utils/vector.h"
 
+
+#ifdef LV_HAVE_SSE
+#include <immintrin.h>
+#endif /* LV_HAVE_SSE */
 
 #define MAX_PDSCH_RE(cp) (2 * SRSLTE_CP_NSYMB(cp) * 12)
 
@@ -49,6 +58,39 @@ cf_t *offset_original=NULL;
 extern int indices[100000];
 extern int indices_ptr; 
 #endif
+
+
+
+typedef struct {
+  /* Thread identifier: they must set before thread creation */
+  pthread_t pthread;
+  uint32_t cw_idx;
+  uint32_t tb_idx;
+  void *pdsch_ptr;
+  bool *ack;
+
+  /* Configuration Encoder/Decoder: they must be set before posting start semaphore */
+  srslte_pdsch_cfg_t *cfg;
+  srslte_sch_t dl_sch;
+  uint16_t rnti;
+
+  /* Encoder/Decoder data pointers: they must be set before posting start semaphore  */
+  uint8_t *data;
+  void *softbuffer;
+
+  /* Execution status */
+  int ret_status;
+
+  /* Semaphores */
+  sem_t start;
+  sem_t finish;
+
+  /* Thread flags */
+  bool started;
+  bool quit;
+} srslte_pdsch_coworker_t;
+
+static void *srslte_pdsch_decode_thread (void *arg);
 
 int srslte_pdsch_cp(srslte_pdsch_t *q, cf_t *input, cf_t *output, srslte_ra_dl_grant_t *grant, uint32_t lstart_grant, uint32_t nsubframe, bool put)
 {
@@ -281,7 +323,26 @@ int srslte_pdsch_init_enb(srslte_pdsch_t *q, uint32_t max_prb)
   return pdsch_init(q, max_prb, false, 0);
 }
 
+static void srslte_pdsch_disable_coworker(srslte_pdsch_t *q) {
+  srslte_pdsch_coworker_t *h = (srslte_pdsch_coworker_t *) q->coworker_ptr;
+  if (h) {
+    /* Stop threads */
+    h->quit = true;
+    sem_post(&h->start);
+
+    pthread_join(h->pthread, NULL);
+    pthread_detach(h->pthread);
+
+    srslte_sch_free(&h->dl_sch);
+
+    free(h);
+
+    q->coworker_ptr = NULL;
+  }
+}
+
 void srslte_pdsch_free(srslte_pdsch_t *q) {
+  srslte_pdsch_disable_coworker(q);
 
   for (int i = 0; i < SRSLTE_MAX_CODEWORDS; i++) {
 
@@ -291,6 +352,10 @@ void srslte_pdsch_free(srslte_pdsch_t *q) {
 
     if (q->d[i]) {
       free(q->d[i]);
+    }
+
+    if (q->csi[i]) {
+      free(q->csi[i]);
     }
   }
 
@@ -344,8 +409,8 @@ int srslte_pdsch_set_cell(srslte_pdsch_t *q, srslte_cell_t cell)
     memcpy(&q->cell, &cell, sizeof(srslte_cell_t));
     q->max_re = q->cell.nof_prb * MAX_PDSCH_RE(q->cell.cp);
 
-    INFO("PDSCH: Cell config PCI=%d, %d ports, %d PRBs, max_symbols: %d\n", q->cell.nof_ports,
-         q->cell.id, q->cell.nof_prb, q->max_re);
+    INFO("PDSCH: Cell config PCI=%d, %d ports, %d PRBs, max_symbols: %d\n",
+         q->cell.id, q->cell.nof_ports, q->cell.nof_prb, q->max_re);
 
     ret = SRSLTE_SUCCESS;
   }
@@ -366,6 +431,8 @@ int srslte_pdsch_set_rnti(srslte_pdsch_t *q, uint16_t rnti) {
         return -1;
       }
     }
+    q->users[rnti_idx]->sequence_generated = false;
+
     for (int i = 0; i < SRSLTE_NSUBFRAMES_X_FRAME; i++) {
       for (int j = 0; j < SRSLTE_MAX_CODEWORDS; j++) {
         if (srslte_sequence_pdsch(&q->users[rnti_idx]->seq[j][i], rnti, j, 2 * i, q->cell.id,
@@ -390,6 +457,22 @@ void srslte_pdsch_set_power_allocation(srslte_pdsch_t *q, float rho_a) {
   if (q) {
     q->rho_a = rho_a;
   }
+}
+
+int srslte_pdsch_enable_csi(srslte_pdsch_t *q, bool enable) {
+  if (enable) {
+    for (int i = 0; i < SRSLTE_MAX_CODEWORDS; i++) {
+      if (!q->csi[i]) {
+        q->csi[i] = srslte_vec_malloc(sizeof(float) * q->max_re * 2);
+        if (!q->csi[i]) {
+          return SRSLTE_ERROR;
+        }
+      }
+    }
+  }
+  q->csi_enabled = enable;
+
+  return SRSLTE_SUCCESS;
 }
 
 void srslte_pdsch_free_rnti(srslte_pdsch_t* q, uint16_t rnti)
@@ -536,10 +619,10 @@ static srslte_sequence_t *get_user_sequence(srslte_pdsch_t *q, uint16_t rnti,
   uint32_t rnti_idx = q->is_ue?0:rnti;
 
   // The scrambling sequence is pregenerated for all RNTIs in the eNodeB but only for C-RNTI in the UE
-  if (q->users[rnti_idx] && q->users[rnti_idx]->sequence_generated &&
-      q->users[rnti_idx]->cell_id == q->cell.id                    &&
-      q->ue_rnti == rnti                                           &&
-      ((rnti >= SRSLTE_CRNTI_START && rnti < SRSLTE_CRNTI_END) || !q->is_ue))
+  if (q->users[rnti_idx] &&
+      q->users[rnti_idx]->sequence_generated &&
+      q->users[rnti_idx]->cell_id == q->cell.id &&
+      (!q->is_ue || q->ue_rnti == rnti))
   {
     return &q->users[rnti_idx]->seq[codeword_idx][sf_idx];
   } else {
@@ -590,15 +673,117 @@ static int srslte_pdsch_codeword_encode(srslte_pdsch_t *q, srslte_pdsch_cfg_t *c
   return SRSLTE_SUCCESS;
 }
 
-static int srslte_pdsch_codeword_decode(srslte_pdsch_t *q, srslte_pdsch_cfg_t *cfg,
-                                               srslte_softbuffer_rx_t *softbuffer, uint16_t rnti, uint8_t *data,
-                                               uint32_t codeword_idx, uint32_t tb_idx, bool *ack) {
+static void csi_correction(srslte_pdsch_t *q, srslte_pdsch_cfg_t *cfg, uint32_t codeword_idx, uint32_t tb_idx, void *e)
+{
+
+  srslte_ra_nbits_t *nbits = &cfg->nbits[tb_idx];
+  uint32_t qm = 0;
+  switch(cfg->grant.mcs[tb_idx].mod) {
+
+    case SRSLTE_MOD_BPSK:
+      qm = 1;
+      break;
+    case SRSLTE_MOD_QPSK:
+      qm = 2;
+      break;
+    case SRSLTE_MOD_16QAM:
+      qm = 4;
+      break;
+    case SRSLTE_MOD_64QAM:
+      qm = 6;
+      break;
+    default:
+      ERROR("No modulation");
+  }
+
+  const uint32_t csi_max_idx = srslte_vec_max_fi(q->csi[codeword_idx], nbits->nof_bits / qm);
+  float csi_max = 1.0f;
+  if (csi_max_idx < nbits->nof_bits / qm) {
+    csi_max = q->csi[codeword_idx][csi_max_idx];
+  }
+  int8_t *e_b   = e;
+  int16_t  *e_s = e;
+  float *csi_v = q->csi[codeword_idx];
+  if (q->llr_is_8bit) {
+    for (int i = 0; i < nbits->nof_bits / qm; i++) {
+      const float csi = *(csi_v++) / csi_max;
+      for (int k = 0; k < qm; k++) {
+        *e_b = (int8_t) ((float) *e_b * csi);
+        e_b++;
+      }
+    }
+  } else {
+    int i = 0;
+
+#ifdef LV_HAVE_SSE
+    __m128 _csi_scale = _mm_set1_ps(INT16_MAX / csi_max);
+    __m64 *_e = (__m64 *) e;
+
+    switch(cfg->grant.mcs[tb_idx].mod) {
+      case SRSLTE_MOD_QPSK:
+        for (; i < nbits->nof_bits - 3; i += 4) {
+          __m128 _csi1 = _mm_set1_ps(*(csi_v++));
+          __m128 _csi2 = _mm_set1_ps(*(csi_v++));
+          _csi1 = _mm_blend_ps(_csi1, _csi2, 3);
+
+          _csi1 = _mm_mul_ps(_csi1, _csi_scale);
+
+          _e[0] = _mm_mulhi_pi16(_e[0], _mm_cvtps_pi16(_csi1));
+          _e += 1;
+        }
+        break;
+      case SRSLTE_MOD_16QAM:
+        for (; i < nbits->nof_bits - 3; i += 4) {
+          __m128 _csi = _mm_set1_ps(*(csi_v++));
+
+          _csi = _mm_mul_ps(_csi, _csi_scale);
+
+          _e[0] = _mm_mulhi_pi16(_e[0], _mm_cvtps_pi16(_csi));
+          _e += 1;
+        }
+        break;
+      case SRSLTE_MOD_64QAM:
+        for (; i < nbits->nof_bits - 11; i += 12) {
+          __m128 _csi1 = _mm_set1_ps(*(csi_v++));
+          __m128 _csi3 = _mm_set1_ps(*(csi_v++));
+
+          _csi1 = _mm_mul_ps(_csi1, _csi_scale);
+          _csi3 = _mm_mul_ps(_csi3, _csi_scale);
+          __m128 _csi2 = _mm_blend_ps(_csi1, _csi3, 3);
+
+          _e[0] = _mm_mulhi_pi16(_e[0], _mm_cvtps_pi16(_csi1));
+          _e[1] = _mm_mulhi_pi16(_e[1], _mm_cvtps_pi16(_csi2));
+          _e[2] = _mm_mulhi_pi16(_e[2], _mm_cvtps_pi16(_csi3));
+          _e += 3;
+        }
+        break;
+      case SRSLTE_MOD_BPSK:
+      case SRSLTE_MOD_LAST:
+        /* Do nothing */
+        break;
+    }
+
+    i /= qm;
+#endif /* LV_HAVE_SSE */
+
+    for (; i < nbits->nof_bits / qm; i++) {
+      const float csi = q->csi[codeword_idx][i] / csi_max;
+      for (int k = 0; k < qm; k++) {
+        e_s[qm * i + k] = (int16_t) ((float) e_s[qm * i + k] * csi);
+      }
+    }
+  }
+}
+
+static int srslte_pdsch_codeword_decode(srslte_pdsch_t *q, srslte_pdsch_cfg_t *cfg, srslte_sch_t *dl_sch,
+                                        srslte_softbuffer_rx_t *softbuffer, uint16_t rnti, uint8_t *data,
+                                        uint32_t codeword_idx, uint32_t tb_idx, bool *ack) {
   srslte_ra_nbits_t *nbits = &cfg->nbits[tb_idx];
   srslte_ra_mcs_t *mcs = &cfg->grant.mcs[tb_idx];
   uint32_t rv = cfg->rv[tb_idx];
   int ret = SRSLTE_ERROR_INVALID_INPUTS;
 
-  if (softbuffer && data && ack) {
+  if (softbuffer && data && ack && nbits->nof_bits && nbits->nof_re) {
     INFO("Decoding PDSCH SF: %d (CW%d -> TB%d), Mod %s, NofBits: %d, NofSymbols: %d, NofBitsE: %d, rv_idx: %d\n",
          cfg->sf_idx, codeword_idx, tb_idx, srslte_mod_string(mcs->mod), mcs->tbs,
          nbits->nof_re, nbits->nof_bits, rv);
@@ -607,16 +792,28 @@ static int srslte_pdsch_codeword_decode(srslte_pdsch_t *q, srslte_pdsch_cfg_t *c
      * The MAX-log-MAP algorithm used in turbo decoding is unsensitive to SNR estimation,
      * thus we don't need tot set it in the LLRs normalization
      */
-    srslte_demod_soft_demodulate_s(mcs->mod, q->d[codeword_idx], q->e[codeword_idx], nbits->nof_re);
+    if (q->llr_is_8bit) {
+      srslte_demod_soft_demodulate_b(mcs->mod, q->d[codeword_idx], q->e[codeword_idx], nbits->nof_re);
+    } else {
+      srslte_demod_soft_demodulate_s(mcs->mod, q->d[codeword_idx], q->e[codeword_idx], nbits->nof_re);
+    }
 
     /* Select scrambling sequence */
     srslte_sequence_t *seq = get_user_sequence(q, rnti, codeword_idx, cfg->sf_idx, nbits->nof_bits);
 
     /* Bit scrambling */
-    srslte_scrambling_s_offset(seq, q->e[codeword_idx], 0, nbits->nof_bits);
+    if (q->llr_is_8bit) {
+      srslte_scrambling_sb_offset(seq, q->e[codeword_idx], 0, nbits->nof_bits);
+    } else {
+      srslte_scrambling_s_offset(seq, q->e[codeword_idx], 0, nbits->nof_bits);
+    }
+
+    if (q->csi_enabled) {
+      csi_correction(q, cfg, codeword_idx, tb_idx, q->e[codeword_idx]);
+    }
 
     /* Return  */
-    ret = srslte_dlsch_decode2(&q->dl_sch, cfg, softbuffer, q->e[codeword_idx], data, tb_idx);
+    ret = srslte_dlsch_decode2(dl_sch, cfg, softbuffer, q->e[codeword_idx], data, tb_idx);
 
     q->last_nof_iterations[codeword_idx] = srslte_sch_last_noi(&q->dl_sch);
 
@@ -630,10 +827,40 @@ static int srslte_pdsch_codeword_decode(srslte_pdsch_t *q, srslte_pdsch_cfg_t *c
       ret = SRSLTE_ERROR;
     }
   } else {
-    ERROR("Detected NULL pointer in TB%d &softbuffer=%p &data=%p &ack=%p", codeword_idx, softbuffer, (void*)data, ack);
+    ERROR("Detected NULL pointer in TB%d &softbuffer=%p &data=%p &ack=%p, nbits=%d, nof_re=%d",
+          codeword_idx, softbuffer, (void*)data, ack, nbits->nof_bits, nbits->nof_re);
   }
 
   return ret;
+}
+
+static void *srslte_pdsch_decode_thread(void *arg) {
+  srslte_pdsch_coworker_t *q = (srslte_pdsch_coworker_t *) arg;
+
+  INFO("[PDSCH Coworker] waiting for data\n");
+
+  sem_wait(&q->start);
+  while (!q->quit) {
+    q->ret_status = srslte_pdsch_codeword_decode(q->pdsch_ptr,
+                                                 q->cfg,
+                                                 &q->dl_sch,
+                                                 q->softbuffer,
+                                                 q->rnti,
+                                                 q->data,
+                                                 q->cw_idx,
+                                                 q->tb_idx,
+                                                 q->ack);
+
+    /* Post finish semaphore */
+    sem_post(&q->finish);
+
+    /* Wait for next loop */
+    sem_wait(&q->start);
+  }
+  sem_post(&q->finish);
+
+  pthread_exit(NULL);
+  return q;
 }
 
 /** Decodes the PDSCH from the received symbols
@@ -656,8 +883,8 @@ int srslte_pdsch_decode(srslte_pdsch_t *q,
   {
     uint32_t nof_tb = SRSLTE_RA_DL_GRANT_NOF_TB(&cfg->grant);
 
-    INFO("Decoding PDSCH SF: %d, RNTI: 0x%x, NofSymbols: %d, C_prb=%d, mimo_type=%d, nof_layers=%d, nof_tb=%d\n",
-        cfg->sf_idx, rnti, cfg->nbits[0].nof_re, cfg->grant.nof_prb, cfg->nof_layers, nof_tb);
+    INFO("Decoding PDSCH SF: %d, RNTI: 0x%x, NofSymbols: %d, C_prb=%d, mimo_type=%s, nof_layers=%d, nof_tb=%d\n",
+        cfg->sf_idx, rnti, cfg->nbits[0].nof_re, cfg->grant.nof_prb, srslte_mod_string(cfg->grant.mcs->mod), cfg->nof_layers, nof_tb);
 
     // Extract Symbols and Channel Estimates
     for (int j=0;j<q->nof_rx_antennas;j++) {
@@ -700,7 +927,7 @@ int srslte_pdsch_decode(srslte_pdsch_t *q,
     }
 
     // Pre-decoder
-    if (srslte_predecoding_type(q->symbols, q->ce, x, q->nof_rx_antennas, q->cell.nof_ports, cfg->nof_layers,
+    if (srslte_predecoding_type(q->symbols, q->ce, x, q->csi, q->nof_rx_antennas, q->cell.nof_ports, cfg->nof_layers,
                                       cfg->codebook_idx, cfg->nbits[0].nof_re, cfg->mimo_type, pdsch_scaling, noise_estimate)<0) {
       DEBUG("Error predecoding\n");
       return SRSLTE_ERROR;
@@ -718,15 +945,56 @@ int srslte_pdsch_decode(srslte_pdsch_t *q,
       /* Decode only if transport block is enabled and the default ACK is not true */
       if (cfg->grant.tb_en[tb_idx]) {
         if (!acks[tb_idx]) {
-          int ret = srslte_pdsch_codeword_decode(q, cfg, softbuffers[tb_idx], rnti, data[tb_idx], cw_idx, tb_idx, &acks[tb_idx]);
+          int ret = SRSLTE_SUCCESS;
+          if (SRSLTE_RA_DL_GRANT_NOF_TB(&cfg->grant) > 1 && tb_idx == 0 && q->coworker_ptr) {
+            srslte_pdsch_coworker_t *h = (srslte_pdsch_coworker_t *) q->coworker_ptr;
+
+            h->pdsch_ptr = q;
+            h->cfg = cfg;
+            h->softbuffer = softbuffers[tb_idx];
+            h->rnti = rnti;
+            h->data = data[tb_idx];
+            h->cw_idx = cw_idx;
+            h->tb_idx = tb_idx;
+            h->ack = &acks[tb_idx];
+            h->dl_sch.max_iterations = q->dl_sch.max_iterations;
+            h->started = true;
+            sem_post(&h->start);
+
+          } else {
+            ret = srslte_pdsch_codeword_decode(q,
+                                               cfg,
+                                               &q->dl_sch,
+                                               softbuffers[tb_idx],
+                                               rnti,
+                                               data[tb_idx],
+                                               cw_idx,
+                                               tb_idx,
+                                               &acks[tb_idx]);
+          }
 
           /* Check if there has been any execution error */
           if (ret) {
-            return ret;
+            /* Do Nothing */
           }
         }
 
         cw_idx = (cw_idx + 1) % SRSLTE_MAX_CODEWORDS;
+      }
+    }
+
+    if (q->coworker_ptr) {
+      srslte_pdsch_coworker_t *h = (srslte_pdsch_coworker_t *) q->coworker_ptr;
+      if (h->started) {
+        int err = sem_wait(&h->finish);
+        if (err) {
+          printf("SCH coworker: %s (nof_tb=%d)\n", strerror(errno), SRSLTE_RA_DL_GRANT_NOF_TB(&cfg->grant));
+        }
+        if (h->ret_status) {
+          ERROR("PDSCH Coworker Decoder: Error decoding");
+        }
+
+        h->started = false;
       }
     }
 
@@ -872,7 +1140,58 @@ void srslte_pdsch_set_max_noi(srslte_pdsch_t *q, uint32_t max_iter) {
 }
 
 float srslte_pdsch_last_noi(srslte_pdsch_t *q) {
-  return srslte_pdsch_last_noi_cw(q, 0);
+  float niters = 0;
+  int   active_cw = 0;
+  for (int i=0;i<SRSLTE_MAX_CODEWORDS;i++) {
+    if (q->last_nof_iterations[i]) {
+      niters += q->last_nof_iterations[i];
+      active_cw++;
+    }
+  }
+  if (active_cw) {
+    return niters/active_cw;
+  } else {
+    return 0;
+  }
+}
+
+int srslte_pdsch_enable_coworker(srslte_pdsch_t *q) {
+  int ret = SRSLTE_SUCCESS;
+
+  if (!q->coworker_ptr) {
+    srslte_pdsch_coworker_t *h = calloc(sizeof(srslte_pdsch_coworker_t), 1);
+
+    if (!h) {
+      ERROR("Allocating coworker");
+      ret = SRSLTE_ERROR;
+      goto clean;
+    }
+    q->coworker_ptr = h;
+
+    if (srslte_sch_init(&h->dl_sch)) {
+      ERROR("Initiating DL SCH");
+      ret = SRSLTE_ERROR;
+      goto clean;
+    }
+
+    if (sem_init(&h->start, 0, 0)) {
+      ERROR("Creating semaphore");
+      ret = SRSLTE_ERROR;
+      goto clean;
+    }
+    if (sem_init(&h->finish, 0, 0)) {
+      ERROR("Creating semaphore");
+      ret = SRSLTE_ERROR;
+      goto clean;
+    }
+    pthread_create(&h->pthread, NULL, srslte_pdsch_decode_thread, (void *) h);
+  }
+
+  clean:
+  if (ret) {
+    srslte_pdsch_disable_coworker(q);
+  }
+  return ret;
 }
 
 uint32_t srslte_pdsch_last_noi_cw(srslte_pdsch_t *q, uint32_t cw_idx) {

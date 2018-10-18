@@ -32,8 +32,8 @@
  *  Reference:    3GPP TS 36.212 version 10.0.0 Release 10 Sec. 5.2.2.6, 5.2.3.3
  *****************************************************************************/
 
-#ifndef CQI_
-#define CQI_
+#ifndef SRSLTE_CQI_H
+#define SRSLTE_CQI_H
 
 #include <stdint.h>
 
@@ -43,6 +43,7 @@
 #define SRSLTE_CQI_MAX_BITS 64
 #define SRSLTE_DIF_CQI_MAX_BITS 3
 #define SRSLTE_PMI_MAX_BITS 4
+#define SRSLTE_CQI_STR_MAX_CHAR 64
 
 typedef struct {
   bool     configured; 
@@ -149,6 +150,9 @@ SRSLTE_API int srslte_cqi_format2_subband_pack(srslte_cqi_format2_subband_t *msg
 SRSLTE_API int srslte_cqi_value_unpack(uint8_t buff[SRSLTE_CQI_MAX_BITS], 
                                        srslte_cqi_value_t *value);
 
+SRSLTE_API int srslte_cqi_value_tostring(srslte_cqi_value_t *value, char *buff, uint32_t buff_len);
+
+
 SRSLTE_API int srslte_cqi_hl_subband_unpack(uint8_t buff[SRSLTE_CQI_MAX_BITS], 
                                             srslte_cqi_hl_subband_t *msg);
 
@@ -178,4 +182,4 @@ SRSLTE_API int srslte_cqi_hl_get_no_subbands(int num_prbs);
 
 SRSLTE_API void srslte_cqi_to_str(const uint8_t *cqi_value, int cqi_len, char *str, int str_len);
 
-#endif // CQI_
+#endif // SRSLTE_CQI_H

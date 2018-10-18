@@ -40,6 +40,7 @@
 #include "srslte/srslte.h"
 #include "srslte/phy/rf/rf.h"
 #include "srslte/phy/rf/rf_utils.h"
+#include "srslte/common/crash_handler.h"
 
 cell_search_cfg_t cell_detect_config = {
   SRSLTE_DEFAULT_MAX_FRAMES_PBCH,
@@ -239,7 +240,7 @@ int main(int argc, char **argv) {
       exit(-1);
     }
 
-  INFO("Stopping RF and flushing buffer...\n",0);
+  INFO("Stopping RF and flushing buffer...\n");
   srslte_rf_stop_rx_stream(&rf);
   srslte_rf_flush_buffer(&rf);
   

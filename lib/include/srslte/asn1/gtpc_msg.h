@@ -21,8 +21,8 @@
  * and at http://www.gnu.org/licenses/.
  *
  */
-#ifndef GTPC_V2_MSG_H
-#define GTPC_V2_MSG_H
+#ifndef SRSLTE_GTPC_MSG_H
+#define SRSLTE_GTPC_MSG_H
 
 #include "srslte/asn1/gtpc_ies.h"
 
@@ -202,6 +202,7 @@ struct gtpc_create_session_request
     struct gtpc_f_teid_ie s12_rnc_f_teid;
     bool s2b_u_epdg_f_teid_present;
     struct gtpc_f_teid_ie s2b_u_epdg_f_teid;
+    struct gtpc_bearer_qos_ie bearer_qos;          // M
   } eps_bearer_context_created;		// M
   //bool bearer_context_deleted_present;
   //struct bearer_context_ bearer_context_deleted;		// C
@@ -268,8 +269,8 @@ struct gtpc_create_session_response
     struct gtpc_f_teid_ie s12_sgw_f_teid;
     bool s2b_u_pgw_f_teid_present;
     struct gtpc_f_teid_ie s2b_u_pgw_f_teid;
-    //bearer_level_qos_present
-    //bearer_level_qos
+    bool bearer_level_qos_present;
+    struct gtpc_bearer_qos_ie bearer_level_qos;
     //charging_id_present
     //charging_id
     //bearer_flags_present
@@ -410,5 +411,36 @@ struct gtpc_delete_session_response
   //Private extension
 };
 
+/****************************************************************************
+ *
+ * GTP-C v2 Release Access Bearers Request
+ * Ref: 3GPP TS 29.274 v10.14.0 Table 7.2.21.1-1
+ *
+ ***************************************************************************/
+struct gtpc_release_access_bearers_request
+{
+  bool list_of_rabs_present;
+  //Linked EPS Bearer ID
+  bool originating_node_present;
+  //Indication Flags
+  //Private Extension
+};
+
+  /****************************************************************************
+   *
+   * GTP-C v2 Delete Session Response
+   * Ref: 3GPP TS 29.274 v10.14.0 Table 7.2.22.1-1
+   *
+   ***************************************************************************/
+
+  struct gtpc_release_access_bearers_response
+  {
+    struct gtpc_cause_ie cause;
+    //Recovery
+    //Private extension
+  };
+
+
+
 } //namespace
-#endif //GTPC_V2_MSG_H
+#endif // SRSLTE_GTPC_MSG_H
